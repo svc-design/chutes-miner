@@ -2,14 +2,14 @@ all:
   vars:
     # This is your SSH public key, e.g. cat ~/.ssh/id_rsa.pub
     ssh_keys:
-      - "ssh-rsa AAAA... user@hostname"
-      - "ssh-rsa BBBB... user@hostname"
+      - "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC2tDDwwyJDuBmzg2KM+6nrnJ5c12VgMSA05KEcxVm/aSNC7oBC6qhlR5NIw4uArO+6avP5yYpBHZp9zA5R6WVYkfh4VC2lhTee1CU/VuP4s+PjmhMNf+GCMuKzB4Xi9V0wu9mtcbAoDWPB7/Md+RT7fOTVlc1ilvMC/50QQIQKzNzP3O3NHAS2vhQOeH0SV/h9wStWrFWFBeE5fq+mbc6mTWrQeuApkfLvbSRV+xToUi3cdsSyZi8RvB9mVTfaBOTdxDC+ZZHlr5igI0CJjW4IHD9HrMZWHqkCqcqmplCQVUNpfUOhdcYRdslyB76lHmdOm0SWI5N+fEQLwRL2DBpnKpmmRCUXmYlH7IdofZll+4f5jO/B3GijC+4ckENC2qCWz0lif0H+2R017Xmbx1ETjKdE6x+bNJk+RjcyBbaeu0c5XXFXI4OzTWgEdTcc0CdbXzvwnBddmgXCaTryhjYf/O/HTosBWXBRc3x1IiU29SPEt4KpwI37aIM66oG6b5c= root@Miner-Controller"
+      - "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDEsuS135lzjVvlH2iNrKz23lDFr7b686xs4d2HINP2glFPmgkgx1D6Dqwisb1UbhWHZmUUzRxXeNlE8fiaO0TXN/C0dsdUxgopnQRyakcA+gfJqqb38Syx8eqdC7mQy9ygOf763dWm6d/SYZ8WgNWLldk4QF9DiZOW9K22DMtY4/1Cqe/YE/WGpOMVr9T9BwvmOjarjWp2OPbx6RVlSOd735Mze5X+cJ9QqdLaisCiSoJ3j9S6dulcxm+7ghPfATvxlJyZWSrRrVqnmV45lPbeuUHlIEyuK1PK2MS6NtUP03ZhdRYJQKZLECpR5xAO/BliOtDdRornvHV1gutYD8/n3IS8sRVzYPvN9DuOhzBnBQUgciu2++R8zMfdVoH7mSbsE8u++vMcBk3UJ1Op0Ct+trl2bsnue96cAnoiII08JKwAaczD5uZIGhdkGV8zKnChNCjzCxP0i4PV/MYW04eWmH+E8G81zq4ZsvrvPYmilBbRrkwHvvbPba3SSb2F2As= shenlan@shenlandeMacBook-Air-2.local"
     # The username you want to use to login to those machines (and your public key will be added to).
-    user: billybob
+    user: root
     # The initial username to login with, for fresh nodes that may not have your username setup.
-    ansible_user: ubuntu
+    ansible_user: root
     # The default validator each GPU worker node will be assigned to.
-    validator: 5Dt7HZ7Zpw4DppPxFM7Ke3Cm7sDAWhsZXmM5ZAmE7dSVJbcQ
+    validator: 5HEqivkDgz3hwoMGLVdkZ4PiMVgYtnn7bDPPH8TRaaDxoYpo
     # By default, no nodes are the primary (CPU node running all the apps, wireguard, etc.) Override this flag exactly once below.
     is_primary: false
     # We assume GPU is enabled on all nodes, but of course you need to disable this for the CPU nodes below.
@@ -37,22 +37,14 @@ all:
   hosts:
     # This would be the main node, which runs postgres, redis, gepetto, etc.
     chutes-miner-cpu-0:
-      ansible_host: 1.0.0.0
-      external_ip: 1.0.0.0
+      ansible_host: 172.24.101.111
+      external_ip: 47.121.25.1
       wireguard_ip: 192.168.0.1
       gpu_enabled: false
       is_primary: true
 
     # These are the GPU nodes, which actually run the chutes.
     chutes-miner-gpu-0:
-      ansible_host: 1.0.0.1
-      external_ip: 1.0.0.1
-      wireguard_ip: 192.168.0.3
-    chutes-miner-gpu-1:
-      ansible_host: 1.0.0.2
-      external_ip: 1.0.0.2
-      wireguard_ip: 192.168.0.4
-    chutes-miner-gpu-2:
-      ansible_host: 1.0.0.3
-      external_ip: 1.0.0.3
-      wireguard_ip: 192.168.0.5
+      ansible_host: 172.24.101.110
+      external_ip: 47.121.143.1
+      wireguard_ip: 192.168.0.2
