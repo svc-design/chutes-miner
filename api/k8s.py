@@ -253,7 +253,7 @@ async def undeploy(deployment_id: str):
         )
     except Exception as exc:
         logger.warning(f"Error deleting deployment from k8s: {exc}")
-    await cleanup_services(deployment_id)
+    await cleanup_service(deployment_id)
     await wait_for_deletion(f"chutes/deployment-id={deployment_id}", timeout_seconds=15)
 
 
@@ -281,11 +281,11 @@ async def create_code_config_map(chute: Chute):
             raise
 
 
-async def create_services_for_deployment(
+async def create_service_for_deployment(
     chute: Chute, deployment_id: str, extra_service_ports: list[dict[str, Any]] = []
 ):
     """
-    Create all services for a deployment.
+    Create a service for the specified deployment.
     """
 
     # And the primary chutes service.
@@ -305,66 +305,33 @@ async def create_services_for_deployment(
             selector={
                 "chutes/deployment-id": deployment_id,
             },
-            ports=[V1ServicePort(port=8000, target_port=8000, protocol="TCP")],
+            ports=[
+                V1ServicePort(port=8000, target_port=8000, protocol="TCP"),
+            ]
+            + [
+                V1ServicePort(port=svc["port"], target_port=svc["port"], protocol=svc["proto"])
+                for svc in extra_service_ports
+            ],
         ),
     )
 
-    # And any extra ports defined.
-    extra_services = [
-        V1Service(
-            metadata=V1ObjectMeta(
-                name=f"chute-service-{deployment_id}-{svc['proto']}{svc['port']}",
-                labels={
-                    "chutes/deployment-id": deployment_id,
-                    "chutes/chute": "true",
-                    "chutes/chute-id": chute.chute_id,
-                    "chutes/version": chute.version,
-                    "chutes/real-port": str(svc["port"]),
-                },
-            ),
-            spec=V1ServiceSpec(
-                type="NodePort",
-                external_traffic_policy="Local",
-                selector={
-                    "chutes/deployment-id": deployment_id,
-                },
-                ports=[
-                    V1ServicePort(port=svc["port"], target_port=svc["port"], protocol=svc["proto"])
-                ],
-            ),
-        )
-        for svc in extra_service_ports
-    ]
-
     # Create, delete any that may have been successful upon failure.
-    all_services = []
-    created = []
     try:
-        for service_def in [service] + extra_services:
-            all_services.append(
-                k8s_core_client().create_namespaced_service(
-                    namespace=settings.namespace, body=service_def
-                )
-            )
-            created.append(service_def)
-        return all_services
+        return k8s_core_client().create_namespaced_service(
+            namespace=settings.namespace, body=service
+        )
     except Exception:
-        for svc in created:
-            try:
-                k8s_core_client().delete_namespaced_service(
-                    name=f"chute-service-{deployment_id}-{svc['proto']}{svc['port']}",
-                    namespace=settings.namespace,
-                )
-            except Exception as exc2:
-                logger.error(f"Error removing extra service {svc=}: {exc2}")
+        raise DeploymentFailure(
+            f"Failed to create service for {chute.chute_id=} and {deployment_id=}"
+        )
 
 
 async def _deploy_chute(
     chute_id: str,
     server_id: str,
     deployment_id: str,
+    service: Any,
     token: str = None,
-    services: list[Any] = [],
     extra_labels: dict[str, str] = {},
 ):
     """
@@ -428,6 +395,7 @@ async def _deploy_chute(
     }
 
     # Command will vary depending on chutes version.
+    extra_env = []
     command = [
         "chutes",
         "run",
@@ -435,13 +403,27 @@ async def _deploy_chute(
         "--port",
         "8000",
     ]
-    if token:
-        command += ["--token", token]
+    if not token:
+        command += ["--graval-seed", str(server.seed)]
     else:
-        command += [
-            "--graval-seed",
-            str(server.seed),
-        ]
+        extra_env.append(
+            V1EnvVar(
+                name="CHUTES_LAUNCH_JWT",
+                value=token,
+            )
+        )
+
+    # Port mappings must be in the environment variables.
+    for port_object in service.spec.ports[1:]:
+        proto = (port_object.protocol or "TCP").upper()
+        extra_env.append(
+            V1EnvVar(
+                name=f"CHUTES_PORT_{proto}_{port_object.port}",
+                value=str(port_object.node_port),
+            )
+        )
+
+    # Tack on the miner/validator addresses.
     command += [
         "--miner-ss58",
         settings.miner_ss58,
@@ -553,6 +535,10 @@ async def _deploy_chute(
                             image_pull_policy="Always",
                             env=[
                                 V1EnvVar(
+                                    name="CHUTES_PORT_PRIMARY",
+                                    value=str(service.spec.ports[0].node_port),
+                                ),
+                                V1EnvVar(
                                     name="CHUTES_EXECUTION_CONTEXT",
                                     value="REMOTE",
                                 ),
@@ -648,7 +634,7 @@ async def _deploy_chute(
         )
 
         # Track the primary port in the database.
-        deployment_port = services[0].spec.ports[0].node_port
+        deployment_port = service.spec.ports[0].node_port
         async with get_session() as session:
             deployment = (
                 (
@@ -681,59 +667,42 @@ async def _deploy_chute(
         )
 
 
-async def cleanup_services(deployment_id: str):
+async def cleanup_service(deployment_id: str):
     """
-    Delete all services for a deployment.
+    Delete the k8s service associated with a depoyment.
     """
-    errors = []
     try:
         k8s_core_client().delete_namespaced_service(
             name=f"chute-service-{deployment_id}",
             namespace=settings.namespace,
         )
     except Exception as exc:
-        errors.append(f"Error removing primary service chute-service-{deployment_id}: {exc}")
-    try:
-        services = k8s_core_client().list_namespaced_service(
-            namespace=settings.namespace, label_selector=f"chutes/deployment-id={deployment_id}"
-        )
-        for service in services.items:
-            if service.metadata.name == f"chute-service-{deployment_id}":
-                continue
-            try:
-                k8s_core_client().delete_namespaced_service(
-                    name=service.metadata.name,
-                    namespace=settings.namespace,
-                )
-            except Exception as exc:
-                logger.error(f"Error removing service {service.metadata.name}: {exc}")
-
-    except Exception as exc:
-        logger.error(f"Error listing services for deployment {deployment_id}: {exc}")
+        logger.warning(f"Error removing primary service chute-service-{deployment_id}: {exc}")
 
 
 async def deploy_chute(
     chute_id: str,
     server_id: str,
     deployment_id: str,
+    service: Any,
     token: str = None,
-    services: list[Any] = [],
     extra_labels: dict[str, str] = {},
 ):
     """
-    Exception handling deployment, such that if a deployment fails the services can be cleaned up.
+    Exception handling deployment, such that if a deployment fails the service can be cleaned up.
     """
     try:
         return await _deploy_chute(
             chute_id,
             server_id,
+            deployment_id,
+            service,
             token=token,
-            services=services,
             extra_labels=extra_labels,
         )
     except Exception as exc:
         logger.warning(
-            f"Deployment of {chute_id=} on {server_id=} with {deployment_id=} failed, cleaning up services...: {exc=}"
+            f"Deployment of {chute_id=} on {server_id=} with {deployment_id=} failed, cleaning up service...: {exc=}"
         )
-        await cleanup_services(deployment_id)
+        await cleanup_service(deployment_id)
         raise
