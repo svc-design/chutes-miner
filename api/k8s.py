@@ -287,22 +287,7 @@ async def create_code_config_map(chute: Chute):
             raise
 
 
-# def get_used_ports(node_name):
-#    ports = set()
-#    pods = k8s_core_client().list_pod_for_all_namespaces(field_selector=f'spec.nodeName={node_name}')
-#    for pod in pods.items:
-#        if pod.spec.host_network:
-#            for container in pod.spec.containers:
-#                if container.ports:
-#                    for port in container.ports:
-#                        if port.container_port:
-#                            ports.add(port.container_port)
-#                        if port.host_port:
-#                            ports.add(port.host_port)
-#    return sorted(list(ports))
-
-
-async def deploy_chute(chute_id: str, server_id: str):
+async def deploy_chute(chute_id: str, server_id: str, token: str = None):
     """
     Deploy a chute!
     """
@@ -326,7 +311,6 @@ async def deploy_chute(chute_id: str, server_id: str):
             raise DeploymentFailure(f"Failed to find chute or server: {chute_id=} {server_id=}")
 
         # Make sure the node has capacity.
-        # used_ports = get_used_ports(server.name)
         gpus_allocated = 0
         available_gpus = {gpu.gpu_id for gpu in server.gpus if gpu.verified}
         for deployment in server.deployments:
@@ -365,6 +349,29 @@ async def deploy_chute(chute_id: str, server_id: str):
         "chutes/version": chute.version,
     }
 
+    # Command will vary depending on chutes version.
+    command = [
+        "chutes",
+        "run",
+        chute.ref_str,
+        "--port",
+        "8000",
+    ]
+    if token:
+        command += ["--token", token]
+    else:
+        command += [
+            "--graval-seed",
+            str(server.seed),
+        ]
+    command += [
+        "--miner-ss58",
+        settings.miner_ss58,
+        "--validator-ss58",
+        server.validator,
+    ]
+
+    # Create the deployment object.
     deployment = V1Deployment(
         metadata=V1ObjectMeta(
             name=f"chute-{deployment_id}",
@@ -529,19 +536,7 @@ async def deploy_chute(chute_id: str, server_id: str):
                                 # read_only_root_filesystem=True,
                                 capabilities={"add": ["IPC_LOCK"]},
                             ),
-                            command=[
-                                "chutes",
-                                "run",
-                                chute.ref_str,
-                                "--port",
-                                "8000",
-                                "--graval-seed",
-                                str(server.seed),
-                                "--miner-ss58",
-                                settings.miner_ss58,
-                                "--validator-ss58",
-                                server.validator,
-                            ],
+                            command=command,
                             ports=[{"containerPort": 8000}],
                             readiness_probe=V1Probe(
                                 _exec=V1ExecAction(

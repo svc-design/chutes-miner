@@ -6,6 +6,7 @@ import aiohttp
 import asyncio
 import orjson as json
 import traceback
+import semver
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from loguru import logger
@@ -200,6 +201,30 @@ class Gepetto:
             raise DeploymentFailure(
                 f"Failed to announce deployment {deployment.deployment_id}: {exc=}"
             )
+
+    async def get_launch_token(self, chute: Chute, job_id: str = None):
+        """
+        Fetch a launch config JWT, if the chutes version supports/requires it.
+        """
+        if semver.compare(chute.chutes_version or "0.0.0", "0.3.0") < 0:
+            return None
+        if (validator := validator_by_hotkey(chute.validator)) is None:
+            raise DeploymentFailure(f"Validator not found: {chute.validator}")
+        try:
+            async with aiohttp.ClientSession(raise_for_status=False) as session:
+                headers, _ = sign_request(purpose="miner")
+                params = {"chute_id": chute.chute_id}
+                if job_id:
+                    params["job_id"] = job_id
+                async with session.get(
+                    f"{validator.api}/instances/launch_config",
+                    headers=headers,
+                    params=params,
+                ) as resp:
+                    return (await resp.json())["token"]
+        except Exception as exc:
+            logger.warning(f"Unable to fetch launch config token: {exc}")
+            raise DeploymentFailure(f"Failed to fetch JWT for launch: {exc}")
 
     async def activate(self, deployment: Deployment):
         """
@@ -793,7 +818,10 @@ class Gepetto:
                 logger.info(f"Attempting to deploy {chute.chute_id=} on {server_id=}")
                 deployment = None
                 try:
-                    deployment, k8s_dep, k8s_svc = await k8s.deploy_chute(chute.chute_id, server_id)
+                    launch_token = await self.get_launch_token(chute)
+                    deployment, k8s_dep, k8s_svc = await k8s.deploy_chute(
+                        chute.chute_id, server_id, token=launch_token
+                    )
                     logger.success(
                         f"Successfully updated {chute_id=} to {version=} on {server_id=}: {deployment.deployment_id=}"
                     )
@@ -1090,8 +1118,11 @@ class Gepetto:
         # Deploy on our target server.
         deployment = None
         try:
+            launch_token = await self.get_launch_token(chute)
             deployment, k8s_dep, k8s_svc = await k8s.deploy_chute(
-                chute.chute_id, target_server.server_id
+                chute.chute_id,
+                target_server.server_id,
+                token=launch_token,
             )
             logger.success(
                 f"Successfully deployed {chute.chute_id=} via preemption on {server.server_id=}: {deployment.deployment_id=}"
@@ -1155,8 +1186,9 @@ class Gepetto:
                         )
                         deployment = None
                         try:
+                            launch_token = await self.get_launch_token(chute)
                             deployment, k8s_dep, k8s_svc = await k8s.deploy_chute(
-                                chute.chute_id, server.server_id
+                                chute.chute_id, server.server_id, token=launch_token
                             )
                             logger.success(
                                 f"Successfully deployed {chute.chute_id=} on {server.server_id=}: {deployment.deployment_id=}"

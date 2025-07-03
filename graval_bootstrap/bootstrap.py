@@ -39,7 +39,7 @@ def main():
     app = FastAPI(
         title="GraVal bootstrap",
         description="GPU info plz",
-        version="0.1.2",
+        version="0.2.3",
     )
     gpu_lock = asyncio.Lock()
 
@@ -93,6 +93,28 @@ def main():
             "devices": [miner.get_device_info(idx) for idx in range(miner._device_count)],
         }
 
+    @app.post("/prove")
+    async def generate_proof(request: Request):
+        """
+        Generate a proof and initialize for decryption.
+        """
+        request_body = await request.body()
+        sha2 = hashlib.sha256(request_body).hexdigest()
+        verify_request(request, (args.validator_whitelist or "").split(","), extra_key=sha2)
+        body = json.loads(request_body.decode())
+        seed = body.get("seed", 42)
+        iterations = body.get("iterations", 1)
+        async with gpu_lock:
+            proofs = miner.prove(seed, iterations=iterations)
+            return {
+                "devices": [
+                    {k: v for k, v in miner.get_device_info(idx).items() if k != "work_product"}
+                    for idx in range(miner._device_count)
+                ],
+                "seed": seed,
+                "proof": proofs,
+            }
+
     @app.post("/decrypt")
     async def decryption_challenge(request: Request):
         """
@@ -110,9 +132,10 @@ def main():
         device_index = body.get("device_index", 0)
         async with gpu_lock:
             if miner._init_seed != seed or miner._init_iter != iterations:
-                miner.initialize(seed, iterations=iterations)
-                miner._init_seed = seed
-                miner._init_iter = iterations
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Seed and/or iterations changed, re-run /prove endpoint",
+                )
             return {
                 "plaintext": miner.decrypt(
                     ciphertext,
