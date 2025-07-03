@@ -247,19 +247,13 @@ async def undeploy(deployment_id: str):
     Delete a deployment, and associated service.
     """
     try:
-        k8s_core_client().delete_namespaced_service(
-            name=f"chute-service-{deployment_id}",
-            namespace=settings.namespace,
-        )
-    except Exception as exc:
-        logger.warning(f"Error deleting deployment service from k8s: {exc}")
-    try:
         k8s_app_client().delete_namespaced_deployment(
             name=f"chute-{deployment_id}",
             namespace=settings.namespace,
         )
     except Exception as exc:
         logger.warning(f"Error deleting deployment from k8s: {exc}")
+    await cleanup_services(deployment_id)
     await wait_for_deletion(f"chutes/deployment-id={deployment_id}", timeout_seconds=15)
 
 
@@ -287,7 +281,92 @@ async def create_code_config_map(chute: Chute):
             raise
 
 
-async def deploy_chute(chute_id: str, server_id: str, token: str = None):
+async def create_services_for_deployment(
+    chute: Chute, deployment_id: str, extra_service_ports: list[dict[str, Any]] = []
+):
+    """
+    Create all services for a deployment.
+    """
+
+    # And the primary chutes service.
+    service = V1Service(
+        metadata=V1ObjectMeta(
+            name=f"chute-service-{deployment_id}",
+            labels={
+                "chutes/deployment-id": deployment_id,
+                "chutes/chute": "true",
+                "chutes/chute-id": chute.chute_id,
+                "chutes/version": chute.version,
+            },
+        ),
+        spec=V1ServiceSpec(
+            type="NodePort",
+            external_traffic_policy="Local",
+            selector={
+                "chutes/deployment-id": deployment_id,
+            },
+            ports=[V1ServicePort(port=8000, target_port=8000, protocol="TCP")],
+        ),
+    )
+
+    # And any extra ports defined.
+    extra_services = [
+        V1Service(
+            metadata=V1ObjectMeta(
+                name=f"chute-service-{deployment_id}-{svc['proto']}{svc['port']}",
+                labels={
+                    "chutes/deployment-id": deployment_id,
+                    "chutes/chute": "true",
+                    "chutes/chute-id": chute.chute_id,
+                    "chutes/version": chute.version,
+                    "chutes/real-port": str(svc["port"]),
+                },
+            ),
+            spec=V1ServiceSpec(
+                type="NodePort",
+                external_traffic_policy="Local",
+                selector={
+                    "chutes/deployment-id": deployment_id,
+                },
+                ports=[
+                    V1ServicePort(port=svc["port"], target_port=svc["port"], protocol=svc["proto"])
+                ],
+            ),
+        )
+        for svc in extra_service_ports
+    ]
+
+    # Create, delete any that may have been successful upon failure.
+    all_services = []
+    created = []
+    try:
+        for service_def in [service] + extra_services:
+            all_services.append(
+                k8s_core_client().create_namespaced_service(
+                    namespace=settings.namespace, body=service_def
+                )
+            )
+            created.append(service_def)
+        return all_services
+    except Exception:
+        for svc in created:
+            try:
+                k8s_core_client().delete_namespaced_service(
+                    name=f"chute-service-{deployment_id}-{svc['proto']}{svc['port']}",
+                    namespace=settings.namespace,
+                )
+            except Exception as exc2:
+                logger.error(f"Error removing extra service {svc=}: {exc2}")
+
+
+async def _deploy_chute(
+    chute_id: str,
+    server_id: str,
+    deployment_id: str,
+    token: str = None,
+    services: list[Any] = [],
+    extra_labels: dict[str, str] = {},
+):
     """
     Deploy a chute!
     """
@@ -322,7 +401,6 @@ async def deploy_chute(chute_id: str, server_id: str, token: str = None):
             )
 
         # Immediately track this deployment (before actually creating it) to avoid allocation contention.
-        deployment_id = str(uuid.uuid4())
         gpus = list([gpu for gpu in server.gpus if gpu.gpu_id in available_gpus])[: chute.gpu_count]
         deployment = Deployment(
             deployment_id=deployment_id,
@@ -403,7 +481,7 @@ async def deploy_chute(chute_id: str, server_id: str, token: str = None):
                         V1Volume(
                             name="cache",
                             host_path=V1HostPathVolumeSource(
-                                path="/var/snap/cache", type="DirectoryOrCreate"
+                                path=f"/var/snap/cache/{chute.chute_id}", type="DirectoryOrCreate"
                             ),
                         ),
                         V1Volume(
@@ -430,6 +508,10 @@ async def deploy_chute(chute_id: str, server_id: str, token: str = None):
                                 "mkdir -p /cache/hub /cache/civitai && chmod -R 777 /cache && python /scripts/cache_cleanup.py"
                             ],
                             env=[
+                                V1EnvVar(
+                                    name="CLEANUP_EXCLUDE",
+                                    value=chute.chute_id,
+                                ),
                                 V1EnvVar(
                                     name="HF_HOME",
                                     value="/cache",
@@ -559,35 +641,14 @@ async def deploy_chute(chute_id: str, server_id: str, token: str = None):
         ),
     )
 
-    # And the service that exposes it.
-    service = V1Service(
-        metadata=V1ObjectMeta(
-            name=f"chute-service-{deployment_id}",
-            labels={
-                "chutes/deployment-id": deployment_id,
-                "chutes/chute": "true",
-                "chutes/chute-id": chute.chute_id,
-                "chutes/version": chute.version,
-            },
-        ),
-        spec=V1ServiceSpec(
-            type="NodePort",
-            external_traffic_policy="Local",
-            selector={
-                "chutes/deployment-id": deployment_id,
-            },
-            ports=[V1ServicePort(port=8000, target_port=8000, protocol="TCP")],
-        ),
-    )
-
+    # Create the deployment in k8s.
     try:
-        created_service = k8s_core_client().create_namespaced_service(
-            namespace=settings.namespace, body=service
-        )
         created_deployment = k8s_app_client().create_namespaced_deployment(
             namespace=settings.namespace, body=deployment
         )
-        deployment_port = created_service.spec.ports[0].node_port
+
+        # Track the primary port in the database.
+        deployment_port = services[0].spec.ports[0].node_port
         async with get_session() as session:
             deployment = (
                 (
@@ -606,15 +667,8 @@ async def deploy_chute(chute_id: str, server_id: str, token: str = None):
             await session.commit()
             await session.refresh(deployment)
 
-        return deployment, created_deployment, created_service
+        return deployment, created_deployment
     except ApiException as exc:
-        try:
-            k8s_core_client().delete_namespaced_service(
-                name=f"chute-service-{deployment_id}",
-                namespace=settings.namespace,
-            )
-        except Exception:
-            ...
         try:
             k8s_core_client().delete_namespaced_deployment(
                 name=f"chute-{deployment_id}",
@@ -625,3 +679,61 @@ async def deploy_chute(chute_id: str, server_id: str, token: str = None):
         raise DeploymentFailure(
             f"Failed to deploy chute {chute.chute_id} with version {chute.version}: {exc}\n{traceback.format_exc()}"
         )
+
+
+async def cleanup_services(deployment_id: str):
+    """
+    Delete all services for a deployment.
+    """
+    errors = []
+    try:
+        k8s_core_client().delete_namespaced_service(
+            name=f"chute-service-{deployment_id}",
+            namespace=settings.namespace,
+        )
+    except Exception as exc:
+        errors.append(f"Error removing primary service chute-service-{deployment_id}: {exc}")
+    try:
+        services = k8s_core_client().list_namespaced_service(
+            namespace=settings.namespace, label_selector=f"chutes/deployment-id={deployment_id}"
+        )
+        for service in services.items:
+            if service.metadata.name == f"chute-service-{deployment_id}":
+                continue
+            try:
+                k8s_core_client().delete_namespaced_service(
+                    name=service.metadata.name,
+                    namespace=settings.namespace,
+                )
+            except Exception as exc:
+                logger.error(f"Error removing service {service.metadata.name}: {exc}")
+
+    except Exception as exc:
+        logger.error(f"Error listing services for deployment {deployment_id}: {exc}")
+
+
+async def deploy_chute(
+    chute_id: str,
+    server_id: str,
+    deployment_id: str,
+    token: str = None,
+    services: list[Any] = [],
+    extra_labels: dict[str, str] = {},
+):
+    """
+    Exception handling deployment, such that if a deployment fails the services can be cleaned up.
+    """
+    try:
+        return await _deploy_chute(
+            chute_id,
+            server_id,
+            token=token,
+            services=services,
+            extra_labels=extra_labels,
+        )
+    except Exception as exc:
+        logger.warning(
+            f"Deployment of {chute_id=} on {server_id=} with {deployment_id=} failed, cleaning up services...: {exc=}"
+        )
+        await cleanup_services(deployment_id)
+        raise

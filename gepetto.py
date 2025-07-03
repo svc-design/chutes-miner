@@ -2,6 +2,7 @@
 Gepetto - coordinate all the things.
 """
 
+import uuid
 import aiohttp
 import asyncio
 import orjson as json
@@ -819,8 +820,14 @@ class Gepetto:
                 deployment = None
                 try:
                     launch_token = await self.get_launch_token(chute)
-                    deployment, k8s_dep, k8s_svc = await k8s.deploy_chute(
-                        chute.chute_id, server_id, token=launch_token
+                    deployment_id = str(uuid.uuid4())
+                    services = await k8s.create_services_for_deployment(chute, deployment_id)
+                    deployment, k8s_dep = await k8s.deploy_chute(
+                        chute.chute_id,
+                        server_id,
+                        deployment_id,
+                        token=launch_token,
+                        services=services,
                     )
                     logger.success(
                         f"Successfully updated {chute_id=} to {version=} on {server_id=}: {deployment.deployment_id=}"
@@ -1119,10 +1126,14 @@ class Gepetto:
         deployment = None
         try:
             launch_token = await self.get_launch_token(chute)
-            deployment, k8s_dep, k8s_svc = await k8s.deploy_chute(
+            deployment_id = str(uuid.uuid4())
+            services = await k8s.create_services_for_deployment(chute, deployment_id)
+            deployment, k8s_dep = await k8s.deploy_chute(
                 chute.chute_id,
                 target_server.server_id,
+                deployment_id,
                 token=launch_token,
+                services=services,
             )
             logger.success(
                 f"Successfully deployed {chute.chute_id=} via preemption on {server.server_id=}: {deployment.deployment_id=}"
@@ -1187,8 +1198,16 @@ class Gepetto:
                         deployment = None
                         try:
                             launch_token = await self.get_launch_token(chute)
+                            deployment_id = str(uuid.uuid4())
+                            services = await k8s.create_services_for_deployment(
+                                chute, deployment_id
+                            )
                             deployment, k8s_dep, k8s_svc = await k8s.deploy_chute(
-                                chute.chute_id, server.server_id, token=launch_token
+                                chute.chute_id,
+                                server.server_id,
+                                deployment_id,
+                                token=launch_token,
+                                services=services,
                             )
                             logger.success(
                                 f"Successfully deployed {chute.chute_id=} on {server.server_id=}: {deployment.deployment_id=}"

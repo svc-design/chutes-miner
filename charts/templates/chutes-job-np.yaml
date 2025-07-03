@@ -1,19 +1,15 @@
 apiVersion: {{ if (.Values.calico | default true) }}projectcalico.org/v3{{ else }}networking.k8s.io/v1{{ end }}
 kind: NetworkPolicy
 metadata:
-  name: chutes-network-policy
+  name: chutes-job-network-policy
 spec:
 {{- if (.Values.calico | default true) }}
-  selector: 'chutes/chute == "true" && chutes/job != "true"'
+  selector: 'chutes/chute == "true" && chutes/job == "true"'
   types:
     - Ingress
     - Egress
   ingress:
     - action: Allow
-      protocol: TCP
-      destination:
-        ports:
-          - 8000
   egress:
     # DNS resolution
     - action: Allow
@@ -26,8 +22,8 @@ spec:
       destination:
         ports:
           - 53
-
-    # External HTTPS traffic (excluding private networks)
+    
+    # TCP egress to public ranges
     - action: Allow
       protocol: TCP
       destination:
@@ -39,41 +35,38 @@ spec:
           - 192.168.0.0/16
           - 169.254.0.0/16
           - 100.64.0.0/10
-        ports:
-          - 443
-
-    # Squid proxy access
+    
+    # UDP egress to public ranges
     - action: Allow
-      protocol: TCP
+      protocol: UDP
       destination:
-        selector: 'app.kubernetes.io/name == "chutes-squid"'
-        ports:
-          - 3128
-
+        nets:
+          - 0.0.0.0/0
+        notNets:
+          - 10.0.0.0/8
+          - 172.16.0.0/12
+          - 192.168.0.0/16
+          - 169.254.0.0/16
+          - 100.64.0.0/10
+    
     # Kubernetes API server access (default namespace, any TCP port)
     - action: Allow
       protocol: TCP
       destination:
         namespaceSelector: default
-
+    
     # Deny all other traffic with immediate rejection
     - action: Deny
 {{- else }}
   podSelector:
     matchLabels:
       chutes/chute: "true"
-    matchExpressions:
-      - key: chutes/job
-        operator: NotIn
-        values:
-          - "true"
+      chutes/job: "true"
   policyTypes:
     - Ingress
     - Egress
   ingress:
-    - ports:
-        - protocol: TCP
-          port: 8000
+    - {}
   egress:
     # DNS resolution
     - ports:
@@ -81,8 +74,8 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-
-    # External HTTPS traffic (excluding private networks)
+    
+    # Allow any egress to non-private IP ranges
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -92,19 +85,7 @@ spec:
               - 192.168.0.0/16
               - 169.254.0.0/16
               - 100.64.0.0/10
-      ports:
-        - protocol: TCP
-          port: 443
-
-    # Squid proxy access
-    - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: chutes-squid
-      ports:
-        - protocol: TCP
-          port: 3128
-
+    
     # Kubernetes API server access (default namespace, any TCP port)
     - to:
         - namespaceSelector:
