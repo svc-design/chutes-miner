@@ -367,3 +367,8 @@ You can add additional GPU nodes at any time by simply updating inventory.yaml a
 To expand your miner's inventory, you should bootstrap them with the ansible scripts, specifically the site and join-cluster bits.  Info for the ansible portions [here](/ansible/README.md#to-add-a-new-node-after-the-fact)
 
 Then, run the `chutes-miner add-node ...` command above.
+
+## 🚀 GitHub Actions IaC
+
+A single workflow file (`infra.yml`) in `.github/workflows` automates the Ansible playbooks. Trigger it with `workflow_dispatch` and set the `ACTION` input to `init`, `update`, `upgrade` or `wireguard-dry-run`. The workflow generates `ansible/inventory.yml` from the provided inputs and runs the matching playbooks.
+
