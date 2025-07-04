@@ -1,0 +1,102 @@
+name: iac
+
+on:
+  workflow_dispatch:
+    inputs:
+      ACTION:
+        description: Which action to run
+        required: true
+        type: choice
+        options: [init, update, upgrade, wireguard-dry-run]
+      CPU_HOST: { required: true }
+      CPU_EXT_IP: { required: true }
+      CPU_WG_IP: { required: true }
+      GPU_HOST: { required: true }
+      GPU_EXT_IP: { required: true }
+      GPU_WG_IP: { required: true }
+      SSH_KEYS: { required: true }
+
+jobs:
+  init:
+    if: ${{ github.event.inputs.ACTION == 'init' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ansible
+        run: sudo apt-get update && sudo apt-get install -y ansible
+      - name: Generate inventory
+        run: |
+          export SSH_KEYS="${{ inputs.SSH_KEYS }}"
+          export CPU_HOST="${{ inputs.CPU_HOST }}"
+          export CPU_EXT_IP="${{ inputs.CPU_EXT_IP }}"
+          export CPU_WG_IP="${{ inputs.CPU_WG_IP }}"
+          export GPU_HOST="${{ inputs.GPU_HOST }}"
+          export GPU_EXT_IP="${{ inputs.GPU_EXT_IP }}"
+          export GPU_WG_IP="${{ inputs.GPU_WG_IP }}"
+          ./scripts/generate_inventory.sh
+      - name: Setup cluster
+        run: |
+          ansible-playbook -i ansible/inventory.yml wireguard.yml
+          ansible-playbook -i ansible/inventory.yml site.yml
+          ansible-playbook -i ansible/inventory.yml join-cluster.yml
+          ansible-playbook -i ansible/inventory.yml extras.yml
+
+  update:
+    if: ${{ github.event.inputs.ACTION == 'update' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ansible
+        run: sudo apt-get update && sudo apt-get install -y ansible
+      - name: Generate inventory
+        run: |
+          export SSH_KEYS="${{ inputs.SSH_KEYS }}"
+          export CPU_HOST="${{ inputs.CPU_HOST }}"
+          export CPU_EXT_IP="${{ inputs.CPU_EXT_IP }}"
+          export CPU_WG_IP="${{ inputs.CPU_WG_IP }}"
+          export GPU_HOST="${{ inputs.GPU_HOST }}"
+          export GPU_EXT_IP="${{ inputs.GPU_EXT_IP }}"
+          export GPU_WG_IP="${{ inputs.GPU_WG_IP }}"
+          ./scripts/generate_inventory.sh
+      - name: Update miner
+        run: ansible-playbook -i ansible/inventory.yml site.yml
+
+  upgrade:
+    if: ${{ github.event.inputs.ACTION == 'upgrade' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ansible
+        run: sudo apt-get update && sudo apt-get install -y ansible
+      - name: Generate inventory
+        run: |
+          export SSH_KEYS="${{ inputs.SSH_KEYS }}"
+          export CPU_HOST="${{ inputs.CPU_HOST }}"
+          export CPU_EXT_IP="${{ inputs.CPU_EXT_IP }}"
+          export CPU_WG_IP="${{ inputs.CPU_WG_IP }}"
+          export GPU_HOST="${{ inputs.GPU_HOST }}"
+          export GPU_EXT_IP="${{ inputs.GPU_EXT_IP }}"
+          export GPU_WG_IP="${{ inputs.GPU_WG_IP }}"
+          ./scripts/generate_inventory.sh
+      - name: Upgrade NVIDIA drivers
+        run: ansible-playbook -i ansible/inventory.yml upgrade-nvidia.yml
+
+  wireguard_dry_run:
+    if: ${{ github.event.inputs.ACTION == 'wireguard-dry-run' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ansible
+        run: sudo apt-get update && sudo apt-get install -y ansible
+      - name: Generate inventory
+        run: |
+          export SSH_KEYS="${{ inputs.SSH_KEYS }}"
+          export CPU_HOST="${{ inputs.CPU_HOST }}"
+          export CPU_EXT_IP="${{ inputs.CPU_EXT_IP }}"
+          export CPU_WG_IP="${{ inputs.CPU_WG_IP }}"
+          export GPU_HOST="${{ inputs.GPU_HOST }}"
+          export GPU_EXT_IP="${{ inputs.GPU_EXT_IP }}"
+          export GPU_WG_IP="${{ inputs.GPU_WG_IP }}"
+          ./scripts/generate_inventory.sh
+      - name: Wireguard dry run
+        run: ansible-playbook -i ansible/inventory.yml wireguard.yml --check
