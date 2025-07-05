@@ -9,7 +9,7 @@ all:
     # The initial username to login with, for fresh nodes that may not have your username setup.
     ansible_user: root
     # The default validator each GPU worker node will be assigned to.
-    validator: 5HEqivkDgz3hwoMGLVdkZ4PiMVgYtnn7bDPPH8TRaaDxoYpo
+    validator: 5GYgtw3J9aXaymosqYCcxX2EpgnRHHJUszbd1zSN9dEwVSEh
     # By default, no nodes are the primary (CPU node running all the apps, wireguard, etc.) Override this flag exactly once below.
     is_primary: false
     # We assume GPU is enabled on all nodes, but of course you need to disable this for the CPU nodes below.
@@ -37,14 +37,18 @@ all:
   hosts:
     # This would be the main node, which runs postgres, redis, gepetto, etc.
     chutes-miner-cpu-0:
-      ansible_host: 172.24.101.111
-      external_ip: 47.121.25.1
+      ansible_host: 172.29.133.135
+      external_ip: 8.219.223.71
       wireguard_ip: 192.168.0.1
       gpu_enabled: false
       is_primary: true
 
-    # These are the GPU nodes, which actually run the chutes.
-    chutes-miner-gpu-0:
-      ansible_host: 172.24.101.110
-      external_ip: 47.121.143.1
-      wireguard_ip: 192.168.0.2
+    chutes-miner-gpu-1:
+      ansible_host: 172.29.133.134
+      external_ip: 47.236.131.91
+      wireguard_ip: 192.168.0.3
+
+    chutes-miner-gpu-2:
+      ansible_host: 172.29.133.136
+      external_ip: 8.222.214.54
+      wireguard_ip: 192.168.0.4

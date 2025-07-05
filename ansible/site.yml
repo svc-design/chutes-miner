@@ -129,8 +129,6 @@
           - python3
           - python3-pip
           - python3-venv
-          - docker.io
-          - docker-compose
           - build-essential
           - nginx
           - redis
@@ -351,6 +349,22 @@
           register: ipv6_disabled
       become: yes
       when: not ipv6_enabled | bool
+
+    - name: Set registry hostname
+      set_fact:
+        registry_hostname: "{{ validator | lower }}.localregistry.chutes.ai"
+
+    - name: Create certs.d directory for registry
+      file:
+        path: "/etc/containerd/certs.d/{{ registry_hostname }}:{{ registry_port }}"
+        state: directory
+        mode: '0755'
+
+    - name: Create hosts.toml for registry
+      template:
+        src: hosts.toml.j2
+        dest: "/etc/containerd/certs.d/{{ registry_hostname }}:{{ registry_port }}/hosts.toml"
+        mode: '0644'
 
     - name: Update DNS resolution config
       template:

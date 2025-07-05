@@ -12,18 +12,18 @@ validators:
   defaultRegistry: registry.chutes.ai
   defaultApi: https://api.chutes.ai
   supported:
-    - hotkey: 5Dt7HZ7Zpw4DppPxFM7Ke3Cm7sDAWhsZXmM5ZAmE7dSVJbcQ
+    - hotkey: 5GYgtw3J9aXaymosqYCcxX2EpgnRHHJUszbd1zSN9dEwVSEh
       registry: registry.chutes.ai
       api: https://api.chutes.ai
       socket: wss://ws.chutes.ai
 
 minerApi:
   image: parachutes/miner:latest
-  imagePullPolicy: Always
+  imagePullPolicy: IfNotPresent
   resources:
     requests:
-      cpu: "1"
-      memory: "4Gi"
+      cpu: "256m"
+      memory: "256Mi"
     limits:
       cpu: "1"
       memory: "4Gi"
@@ -45,11 +45,11 @@ minerApi:
 
 gepetto:
   image: parachutes/miner:latest
-  imagePullPolicy: Always
+  imagePullPolicy: IfNotPresent
   resources:
     requests:
-      cpu: "1"
-      memory: "4Gi"
+      cpu: "256m"
+      memory: "256Mi"
     limits:
       cpu: "1"
       memory: "4Gi"
@@ -71,8 +71,8 @@ postgres:
     enabled: true
   resources:
     requests:
-      cpu: "1"
-      memory: "4Gi"
+      cpu: "256m"
+      memory: "256Mi"
     limits:
       cpu: "1"
       memory: "4Gi"
@@ -112,8 +112,8 @@ redis:
   tolerations: []
   resources:
     requests:
-      cpu: 1
-      memory: 1Gi
+      cpu: "256m"
+      memory: "256Mi"
     limits:
       cpu: 1
       memory: 1Gi
