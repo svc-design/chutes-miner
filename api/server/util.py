@@ -156,7 +156,7 @@ async def gather_gpu_info(
 
 
 async def deploy_graval(
-    node_object: V1Node, validator_hotkey: str
+    node_object: V1Node, validator_hotkey: str, cpu_per_gpu: int, memory_per_gpu: int
 ) -> Tuple[V1Deployment, V1Service]:
     """
     Create a deployment of the GraVal base validation service on a node.
@@ -219,13 +219,13 @@ async def deploy_graval(
                             ],
                             resources=V1ResourceRequirements(
                                 requests={
-                                    "cpu": str(gpu_count),
-                                    "memory": "8Gi",
+                                    "cpu": str(gpu_count * cpu_per_gpu),
+                                    "memory": f"{int(gpu_count * memory_per_gpu)}Gi",
                                     "nvidia.com/gpu": str(gpu_count),
                                 },
                                 limits={
-                                    "cpu": str(gpu_count),
-                                    "memory": "8Gi",
+                                    "cpu": str(gpu_count * cpu_per_gpu),
+                                    "memory": f"{int(gpu_count * memory_per_gpu)}Gi",
                                     "nvidia.com/gpu": str(gpu_count),
                                 },
                             ),
@@ -489,6 +489,8 @@ async def bootstrap_server(node_object: V1Node, server_args: ServerArgs):
             ...
         if delete_node:
             logger.info(f"Purging failed server: {node_name=} {node_uid=}")
+            gpu_ids = []
+            validator = None
             async with get_session() as session:
                 node = (
                     (await session.execute(select(Server).where(Server.server_id == node_uid)))
@@ -496,8 +498,28 @@ async def bootstrap_server(node_object: V1Node, server_args: ServerArgs):
                     .scalar_one_or_none()
                 )
                 if node:
+                    gpu_ids = [gpu.gpu_id for gpu in node.gpus]
+                    validator = validator_by_hotkey(node.validator)
                     await session.delete(node)
                 await session.commit()
+
+                if not gpu_ids:
+                    return
+
+                for gpu_id in gpu_ids:
+                    try:
+                        async with aiohttp.ClientSession(raise_for_status=True) as http_session:
+                            headers, _ = sign_request(purpose="nodes")
+                            async with http_session.delete(
+                                f"{validator.api}/nodes/{gpu_id}", headers=headers
+                            ) as resp:
+                                logger.success(
+                                    f"Successfully purged {gpu_id=} from validator={validator.hotkey}: {await resp.json()}"
+                                )
+                    except Exception as exc:
+                        logger.warning(
+                            f"Error purging {gpu_id=} from validator={validator.hotkey}: {exc}"
+                        )
 
     yield sse_message(
         f"attempting to add node server_id={node_object.metadata.uid} to inventory...",
@@ -519,7 +541,9 @@ async def bootstrap_server(node_object: V1Node, server_args: ServerArgs):
         yield sse_message(
             f"server with server_id={node_object.metadata.uid} now tracked in database, provisioning graval...",
         )
-        graval_dep, graval_svc = await deploy_graval(node, server_args.validator)
+        graval_dep, graval_svc = await deploy_graval(
+            node, server_args.validator, server.cpu_per_gpu, server.memory_per_gpu
+        )
 
         # Excellent, now gather the GPU info.
         yield sse_message(
@@ -547,15 +571,15 @@ async def bootstrap_server(node_object: V1Node, server_args: ServerArgs):
                 f"failed to advertising node to {validator.hotkey} via {validator.api}: {exc}",
             )
             raise
-        assert (
-            len(set(node["seed"] for node in validator_nodes)) == 1
-        ), f"more than one seed produced from {validator.hotkey}!"
+        assert len(set(node["seed"] for node in validator_nodes)) == 1, (
+            f"more than one seed produced from {validator.hotkey}!"
+        )
         if not seed:
             seed = validator_nodes[0]["seed"]
         else:
-            assert (
-                seed == validator_nodes[0]["seed"]
-            ), f"validators produced differing seeds {seed} vs {validator_nodes[0]['seed']}"
+            assert seed == validator_nodes[0]["seed"], (
+                f"validators produced differing seeds {seed} vs {validator_nodes[0]['seed']}"
+            )
         yield sse_message(
             f"successfully advertised node {node_object.metadata.uid} to validator {validator.hotkey}, received seed: {seed}"
         )
