@@ -26,7 +26,7 @@ class Ciphertext(BaseModel):
 class Challenge(BaseModel):
     seed: int = Field(..., ge=0)
     iterations: int = Field(1, ge=1, le=10)
-    ciphertexts: Optional[list[Ciphertext]] = []
+    ciphertext: Optional[list[Ciphertext]] = []
 
 
 def main():
@@ -127,7 +127,7 @@ def main():
             }
 
             # Decrypt all ciphertexts, if provided.
-            for cipher in challenge.ciphertexts:
+            for cipher in challenge.ciphertext:
                 bytes_ = base64.b64decode(cipher.data)
                 iv = bytes_[:16]
                 ciphertext = bytes_[16:]
