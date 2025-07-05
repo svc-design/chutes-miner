@@ -52,7 +52,7 @@ def main():
     app = FastAPI(
         title="GraVal bootstrap",
         description="GPU info plz",
-        version="0.2.3",
+        version="0.2.4",
     )
     gpu_lock = asyncio.Lock()
 
