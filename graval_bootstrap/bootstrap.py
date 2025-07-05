@@ -123,7 +123,7 @@ def main():
                 ],
                 "seed": challenge.seed,
                 "proof": proofs,
-                "plaintexts": [],
+                "plaintext": [],
             }
 
             # Decrypt all ciphertexts, if provided.
@@ -132,16 +132,15 @@ def main():
                 iv = bytes_[:16]
                 ciphertext = bytes_[16:]
                 return_value["plaintext"].append(
-                    {
-                        "device_index": cipher.device_index,
-                        "text": miner.decrypt(
-                            ciphertext,
-                            iv,
-                            len(ciphertext),
-                            cipher.device_index,
-                        ),
-                    }
+                    miner.decrypt(
+                        challenge.seed,
+                        ciphertext,
+                        iv,
+                        len(ciphertext),
+                        cipher.device_index,
+                    ),
                 )
+            return return_value
 
     @app.get("/info", response_class=PlainTextResponse)
     async def info_challenge(request: Request, challenge: str):
