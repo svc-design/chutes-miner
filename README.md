@@ -370,5 +370,5 @@ Then, run the `chutes-miner add-node ...` command above.
 
 ## 🚀 GitHub Actions IaC
 
-A single workflow file (`infra.yml`) in `.github/workflows` automates the Ansible playbooks. Trigger it with `workflow_dispatch` and set the `ACTION` input to `init`, `update`, `upgrade` or `wireguard-dry-run`. The workflow generates `ansible/inventory.yml` from the provided inputs and runs the matching playbooks.
+A single workflow file (`iac.yml`) in `.github/workflows` automates the Ansible playbooks. Trigger it with `workflow_dispatch` and set the `ACTION` input to `init`, `update`, `upgrade`, `add-node` or `wireguard-dry-run`. The workflow generates `ansible/inventory.yml` from the provided inputs and runs the matching playbooks. When using `add-node`, additional inputs are required to specify the node details and hotkey path.
 

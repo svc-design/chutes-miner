@@ -7,7 +7,7 @@ on:
         description: Which action to run
         required: true
         type: choice
-        options: [init, update, upgrade, wireguard-dry-run]
+        options: [init, update, upgrade, add-node, wireguard-dry-run]
       CPU_HOST: { required: true }
       CPU_EXT_IP: { required: true }
       CPU_WG_IP: { required: true }
@@ -15,6 +15,12 @@ on:
       GPU_EXT_IP: { required: true }
       GPU_WG_IP: { required: true }
       SSH_KEYS: { required: true }
+      NODE_NAME: { required: false }
+      VALIDATOR: { required: false }
+      HOURLY_COST: { required: false }
+      GPU_SHORT_REF: { required: false }
+      HOTKEY_PATH: { required: false }
+      MINER_API: { required: false }
 
 jobs:
   init:
@@ -100,3 +106,24 @@ jobs:
           ./scripts/generate_inventory.sh
       - name: Wireguard dry run
         run: ansible-playbook -i ansible/inventory.yml wireguard.yml --check
+
+  add_node:
+    if: ${{ github.event.inputs.ACTION == 'add-node' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Install CLI
+        run: pip install chutes-miner-cli
+      - name: Register GPU node
+        run: |
+          chutes-miner add-node \
+            --name "${{ inputs.NODE_NAME }}" \
+            --validator "${{ inputs.VALIDATOR }}" \
+            --hourly-cost "${{ inputs.HOURLY_COST }}" \
+            --gpu-short-ref "${{ inputs.GPU_SHORT_REF }}" \
+            --hotkey "${{ inputs.HOTKEY_PATH }}" \
+            --miner-api "${{ inputs.MINER_API }}"
