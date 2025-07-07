@@ -307,6 +307,7 @@ async def create_service_for_deployment(
             },
             ports=[
                 V1ServicePort(port=8000, target_port=8000, protocol="TCP"),
+                V1ServicePort(port=8001, target_port=8001, protocol="TCP"),
             ]
             + [
                 V1ServicePort(port=svc["port"], target_port=svc["port"], protocol=svc["proto"])
@@ -414,7 +415,7 @@ async def _deploy_chute(
         )
 
     # Port mappings must be in the environment variables.
-    for port_object in service.spec.ports[1:]:
+    for port_object in service.spec.ports[2:]:
         proto = (port_object.protocol or "TCP").upper()
         extra_env.append(
             V1EnvVar(
@@ -537,6 +538,10 @@ async def _deploy_chute(
                                 V1EnvVar(
                                     name="CHUTES_PORT_PRIMARY",
                                     value=str(service.spec.ports[0].node_port),
+                                ),
+                                V1EnvVar(
+                                    name="CHUTES_PORT_LOGGING",
+                                    value=str(service.spec.ports[1].node_port),
                                 ),
                                 V1EnvVar(
                                     name="CHUTES_EXECUTION_CONTEXT",
