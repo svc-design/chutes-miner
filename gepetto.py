@@ -287,6 +287,9 @@ class Gepetto:
 
                 # For each deployment, check if it's ready to go in kubernetes.
                 for deployment in deployments:
+                    if semver.compare(deployment.chute.chutes_version or "0.0.0", "0.3.0") >= 0:
+                        # The new chutes library activates the chute as part of startup flow via JWT.
+                        continue
                     k8s_deployment = await k8s.get_deployment(deployment.deployment_id)
                     if not k8s_deployment:
                         logger.warning("NO K8s!")
