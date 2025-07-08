@@ -576,6 +576,9 @@ class Gepetto:
         logger.info(
             f"Received job_created event for {chute_id=} {job_id=} with {gpu_count=} and {compute_multiplier=}"
         )
+        if settings.miner_ss58 in event_data.get("excluded", []):
+            logger.warning("Miner hotkey excluded from job!")
+            return
         if (validator := validator_by_hotkey(validator_hotkey)) is None:
             logger.warning(f"Validator not found: {validator_hotkey}")
             return
