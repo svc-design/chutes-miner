@@ -333,6 +333,7 @@ async def _deploy_chute(
     deployment_id: str,
     service: Any,
     token: str = None,
+    job_id: str = None,
     extra_labels: dict[str, str] = {},
 ):
     """
@@ -379,6 +380,7 @@ async def _deploy_chute(
             active=False,
             verified_at=None,
             stub=True,
+            job_id=job_id,
         )
         session.add(deployment)
         deployment.gpus = gpus
@@ -691,6 +693,7 @@ async def deploy_chute(
     deployment_id: str,
     service: Any,
     token: str = None,
+    job_id: str = None,
     extra_labels: dict[str, str] = {},
 ):
     """
@@ -704,10 +707,11 @@ async def deploy_chute(
             service,
             token=token,
             extra_labels=extra_labels,
+            job_id=job_id,
         )
     except Exception as exc:
         logger.warning(
-            f"Deployment of {chute_id=} on {server_id=} with {deployment_id=} failed, cleaning up service...: {exc=}"
+            f"Deployment of {chute_id=} on {server_id=} with {deployment_id=} {job_id=} failed, cleaning up service...: {exc=}"
         )
         await cleanup_service(deployment_id)
         raise

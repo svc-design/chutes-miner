@@ -53,10 +53,11 @@ class Gepetto:
         self.pubsub.on_event("rolling_update")(self.rolling_update)
         self.pubsub.on_event("chute_deleted")(self.chute_deleted)
         self.pubsub.on_event("chute_created")(self.chute_created)
-        self.pubsub.on_event("chute_updated")(self.chute_updated)
         self.pubsub.on_event("bounty_change")(self.bounty_changed)
         self.pubsub.on_event("image_deleted")(self.image_deleted)
         self.pubsub.on_event("image_created")(self.image_created)
+        self.pubsub.on_event("job_created")(self.job_created)
+        self.pubsub.on_event("job_deleted")(self.job_deleted)
 
     async def run(self):
         """
@@ -212,7 +213,7 @@ class Gepetto:
         if (validator := validator_by_hotkey(chute.validator)) is None:
             raise DeploymentFailure(f"Validator not found: {chute.validator}")
         try:
-            async with aiohttp.ClientSession(raise_for_status=False) as session:
+            async with aiohttp.ClientSession(raise_for_status=True) as session:
                 headers, _ = sign_request(purpose="miner")
                 params = {"chute_id": chute.chute_id}
                 if job_id:
@@ -510,6 +511,114 @@ class Gepetto:
             )
         # Nothing to do here really, it should just start receiving traffic.
 
+    async def release_job(self, chute: Chute, job_id: str):
+        """
+        Release the lock/launch config on a job for another miner to pick up.
+        """
+        if (validator := validator_by_hotkey(chute.validator)) is None:
+            return
+        try:
+            async with aiohttp.ClientSession(raise_for_status=True) as session:
+                headers, _ = sign_request(purpose="miner")
+                async with session.delete(
+                    f"{validator.api}/miner/jobs/{job_id}",
+                    headers=headers,
+                ) as resp:
+                    logger.success(f"Successfully released job {job_id=}: {await resp.json()}")
+        except Exception as exc:
+            logger.warning(f"Failed to release job: {exc=}")
+
+    async def run_job(self, chute: Chute, job_id: str, server: Server, validator: Validator):
+        """
+        Run a job on the specified server.
+        """
+        logger.info(f"Attempting to deploy {job_id=} for {chute.chute_id=} on {server.server_id=}")
+        deployment = None
+        try:
+            launch_token = await self.get_launch_token(chute, job_id=job_id)
+            deployment_id = str(uuid.uuid4())
+            service = await k8s.create_service_for_deployment(chute, deployment_id)
+            deployment, k8s_dep, k8s_svc = await k8s.deploy_chute(
+                chute.chute_id,
+                server.server_id,
+                deployment_id,
+                service,
+                token=launch_token,
+                job_id=job_id,
+                extra_labels={"chutes/job": "true"},
+            )
+            logger.success(
+                f"Successfully deployed {job_id=} {chute.chute_id=} on {server.server_id=}: {deployment.deployment_id=}"
+            )
+        except DeploymentFailure as exc:
+            logger.error(
+                f"Error attempting to deploy {chute.chute_id=} on {server.server_id=}: {exc}\n{traceback.format_exc()}"
+            )
+            if deployment:
+                await self.undeploy(deployment.deployment_id)
+            await self.release_job(chute, job_id)
+
+    async def job_created(self, event_data: Dict[str, Any]):
+        """
+        Job available for processing.
+
+        MINERS: This is another crtically important method to optimize. You don't want to
+                blindly accept jobs and preempt your existing deployments most likely, but
+                there are benefits to accepting them (you get a bounty, compute multiplier
+                is semi-dynamic and may provide more compute units than a chute, etc).
+        """
+        chute_id = event_data["chute_id"]
+        job_id = event_data["job_id"]
+        gpu_count = event_data["gpu_count"]
+        compute_multiplier = event_data["compute_multiplier"]
+        validator_hotkey = event_data["validator"]
+
+        logger.info(
+            f"Received job_created event for {chute_id=} {job_id=} with {gpu_count=} and {compute_multiplier=}"
+        )
+        if (validator := validator_by_hotkey(validator_hotkey)) is None:
+            logger.warning(f"Validator not found: {validator_hotkey}")
+            return
+
+        # Do we already have a node that can accept the job, without pre-emption?
+        chute = await self.get_chute(chute_id, validator_hotkey)
+        if not chute:
+            logger.warning(f"Failed to load chute: {chute_id}")
+            return
+        server = await self.optimal_scale_up_server(chute)
+        if server:
+            await self.run_job(chute, job_id, server, validator)
+            return
+
+        # XXX This is where you as a miner definitely want to customize the strategy!
+        supported_gpus = set(chute.supported_gpus)
+        if supported_gpus - set(["h200"]):
+            # Generally speaking, non-h200 GPUs typically have lower compute multipliers than
+            # the job would provide because they regularly do not have even one request in flight
+            # on average, although that is not always the case, so this should be updated to be smarter.
+            logger.info(
+                f"Attempting a pre-empting deploy of {job_id=} {chute_id=} with {supported_gpus=} and {gpu_count=}"
+            )
+            await self.preempting_deploy(chute, job_id=job_id)
+
+    async def job_deleted(self, event_data: Dict[str, Any]):
+        """
+        Job has been deleted.
+        """
+        async with get_session() as session:
+            deployment = (
+                (
+                    await session.execute(
+                        select(Deployment).where(Deployment.job_id == event_data["job_id"])
+                    )
+                )
+                .unique()
+                .scalar_one_or_none()
+            )
+        if deployment:
+            logger.info(f"Received job_deleted event, undeploying {deployment.deployment_id=}!")
+            await self.undeploy(deployment.deployment_id)
+
     async def bounty_changed(self, event_data):
         """
         Bounty has changed for a chute.
@@ -753,7 +862,9 @@ class Gepetto:
                 deployment = (
                     (
                         await session.execute(
-                            select(Deployment).where(Deployment.instance_id == instance_id)
+                            select(Deployment).where(
+                                Deployment.instance_id == instance_id, Deployment.job_id.is_(None)
+                            )
                         )
                     )
                     .unique()
@@ -835,7 +946,8 @@ class Gepetto:
                     logger.success(
                         f"Successfully updated {chute_id=} to {version=} on {server_id=}: {deployment.deployment_id=}"
                     )
-                    await self.announce_deployment(deployment)
+                    if not launch_token:
+                        await self.announce_deployment(deployment)
                 except DeploymentFailure as exc:
                     logger.error(
                         f"Unhandled error attempting to deploy {chute.chute_id=} on {server_id=}: {exc}\n{traceback.format_exc()}"
@@ -843,24 +955,6 @@ class Gepetto:
                     if deployment:
                         await self.undeploy(deployment.deployment_id)
                     return
-
-    async def chute_updated(self, event_data: Dict[str, Any]):
-        """
-        A new version of a chute was published, meaning we need to replace the existing
-        deployments with the updated versions.
-        """
-        chute_id = event_data["chute_id"]
-        version = event_data["version"]
-        old_version = event_data.get("old_version")
-        validator_hotkey = event_data["validator"]
-        logger.info(f"Received chute_updated event for {chute_id=} {version=}")
-        current_count = 0
-        if old_version:
-            current_count = await self.count_deployments(chute_id, version, validator_hotkey)
-            await self.chute_deleted(
-                {"chute_id": chute_id, "version": old_version, "validator": validator_hotkey}
-            )
-        await self.chute_created(event_data, desired_count=current_count or 1)
 
     @staticmethod
     async def optimal_scale_down_deployment(chute: Chute) -> Optional[Deployment]:
@@ -958,7 +1052,7 @@ class Gepetto:
             row = result.first()
             return row.Server if row else None
 
-    async def preempting_deploy(self, chute: Chute):
+    async def preempting_deploy(self, chute: Chute, job_id: str = None):
         """
         Force deploy a chute by preempting other deployments (assuming a server exists that can be used).
         """
@@ -1119,16 +1213,34 @@ class Gepetto:
             )
             return
 
+        # Before we actually delete any deployments, let's ensure we can actually obtain the launch token,
+        # because only one miner can claim a single job for example, so we don't want to undeploy if we
+        # don't actually get the lock.
+        try:
+            launch_token = await self.get_launch_token(chute, job_id=job_id)
+        except DeploymentFailure:
+            logger.warning(
+                f"Failed to obtain launch token, skipping pre-emption {chute.chute_id=} {job_id=}"
+            )
+            return
+
         # Do the preemption.
-        if to_preempt:
-            logger.info(f"Preempting deployments to make room for {chute.chute_id=}: {to_preempt}")
-            for deployment_id in to_preempt:
-                await self.undeploy(deployment_id)
+        try:
+            if to_preempt:
+                logger.info(
+                    f"Preempting deployments to make room for {chute.chute_id=}: {to_preempt}"
+                )
+                for deployment_id in to_preempt:
+                    await self.undeploy(deployment_id)
+        except Exception as exc:
+            logger.error(f"Unexpected error preempting deployments: {exc}")
+            if job_id:
+                await self.release_job(chute, job_id)
+            raise
 
         # Deploy on our target server.
         deployment = None
         try:
-            launch_token = await self.get_launch_token(chute)
             deployment_id = str(uuid.uuid4())
             service = await k8s.create_service_for_deployment(chute, deployment_id)
             deployment, k8s_dep = await k8s.deploy_chute(
@@ -1139,15 +1251,18 @@ class Gepetto:
                 token=launch_token,
             )
             logger.success(
-                f"Successfully deployed {chute.chute_id=} via preemption on {server.server_id=}: {deployment.deployment_id=}"
+                f"Successfully deployed {chute.chute_id=} {job_id=} via preemption on {server.server_id=}: {deployment.deployment_id=}"
             )
-            await self.announce_deployment(deployment)
+            if not launch_token:
+                await self.announce_deployment(deployment)
         except DeploymentFailure as exc:
             logger.error(
-                f"Error attempting to deploy {chute.chute_id=} on {server.server_id=} via preemption: {exc}\n{traceback.format_exc()}"
+                f"Error attempting to deploy {chute.chute_id=} {job_id=} on {server.server_id=} via preemption: {exc}\n{traceback.format_exc()}"
             )
             if deployment:
                 await self.undeploy(deployment.deployment_id)
+            if job_id:
+                self.release_job(chute, job_id)
 
     async def scale_chute(self, chute: Chute, desired_count: int, preempt: bool = False):
         """
@@ -1213,7 +1328,8 @@ class Gepetto:
                             logger.success(
                                 f"Successfully deployed {chute.chute_id=} on {server.server_id=}: {deployment.deployment_id=}"
                             )
-                            await self.announce_deployment(deployment)
+                            if not launch_token:
+                                await self.announce_deployment(deployment)
                         except DeploymentFailure as exc:
                             logger.error(
                                 f"Error attempting to deploy {chute.chute_id=} on {server.server_id=}: {exc}\n{traceback.format_exc()}"
