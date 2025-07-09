@@ -579,6 +579,9 @@ class Gepetto:
         chute_id = event_data["chute_id"]
         version = event_data["version"]
         validator_hotkey = event_data["validator"]
+        logger.info(
+            f"Received chute_updated event from {validator_hotkey=} for {chute_id=} {version=}"
+        )
 
         if (validator := validator_by_hotkey(validator_hotkey)) is None:
             logger.warning(f"Validator not found: {validator_hotkey}")

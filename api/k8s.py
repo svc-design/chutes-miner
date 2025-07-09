@@ -414,12 +414,16 @@ async def _deploy_chute(
     if not token:
         command += ["--graval-seed", str(server.seed)]
     else:
-        extra_env.append(
+        extra_env += [
             V1EnvVar(
                 name="CHUTES_LAUNCH_JWT",
                 value=token,
-            )
-        )
+            ),
+            V1EnvVar(
+                name="CHUTES_EXTERNAL_HOST",
+                value=server.ip_address,
+            ),
+        ]
 
     # Port mappings must be in the environment variables.
     for port_object in service.spec.ports[2:]:

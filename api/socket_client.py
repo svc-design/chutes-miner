@@ -113,10 +113,6 @@ class SocketClient:
                 wait_timeout=10,
                 wait=True,
                 transports=["websocket"],
-                reconnection=True,
-                reconnection_attempts=0,
-                reconnection_delay=1,
-                reconnection_delay_max=15,
             )
             await self.sio.wait()
         except Exception as e:
