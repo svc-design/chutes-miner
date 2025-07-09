@@ -2,6 +2,7 @@
 Gepetto - coordinate all the things.
 """
 
+import re
 import uuid
 import aiohttp
 import asyncio
@@ -58,6 +59,7 @@ class Gepetto:
         self.pubsub.on_event("image_created")(self.image_created)
         self.pubsub.on_event("job_created")(self.job_created)
         self.pubsub.on_event("job_deleted")(self.job_deleted)
+        self.pubsub.on_event("chute_updated")(self.chute_updated)
 
     async def run(self):
         """
@@ -208,21 +210,28 @@ class Gepetto:
         """
         Fetch a launch config JWT, if the chutes version supports/requires it.
         """
-        if semver.compare(chute.chutes_version or "0.0.0", "0.3.0") < 0:
+        core_version = re.match(r"^([0-9]+\.[0-9]+\.[0-9]+).*", chute.chutes_version).group(1)
+        if semver.compare(core_version or "0.0.0", "0.3.0") < 0:
             return None
         if (validator := validator_by_hotkey(chute.validator)) is None:
             raise DeploymentFailure(f"Validator not found: {chute.validator}")
         try:
-            async with aiohttp.ClientSession(raise_for_status=True) as session:
-                headers, _ = sign_request(purpose="miner")
+            async with aiohttp.ClientSession(raise_for_status=False) as session:
+                headers, _ = sign_request(purpose="launch")
                 params = {"chute_id": chute.chute_id}
                 if job_id:
                     params["job_id"] = job_id
+                logger.warning(f"SENDING LAUNCH TOKEN REQUEST WITH {headers=}")
                 async with session.get(
                     f"{validator.api}/instances/launch_config",
                     headers=headers,
                     params=params,
                 ) as resp:
+                    if resp.status != 200:
+                        logger.error(
+                            f"Failed to fetch launch token: {resp.status=} -> {await resp.text()}"
+                        )
+                    resp.raise_for_status()
                     return (await resp.json())["token"]
         except Exception as exc:
             logger.warning(f"Unable to fetch launch config token: {exc}")
@@ -288,7 +297,10 @@ class Gepetto:
 
                 # For each deployment, check if it's ready to go in kubernetes.
                 for deployment in deployments:
-                    if semver.compare(deployment.chute.chutes_version or "0.0.0", "0.3.0") >= 0:
+                    core_version = re.match(
+                        r"^([0-9]+\.[0-9]+\.[0-9]+).*", deployment.chute.chutes_version
+                    ).group(1)
+                    if semver.compare(core_version or "0.0.0", "0.3.0") >= 0:
                         # The new chutes library activates the chute as part of startup flow via JWT.
                         continue
                     k8s_deployment = await k8s.get_deployment(deployment.deployment_id)
@@ -339,6 +351,8 @@ class Gepetto:
                     chute_name = chute_info.get("name")
                     chute = await self.load_chute(chute_id, chute_info["version"], validator)
                     if not chute:
+                        continue
+                    if not chute_info.get("cords"):
                         continue
                     if scalable.get(validator, {}).get(chute_id) not in (None, True):
                         continue
@@ -538,7 +552,7 @@ class Gepetto:
             launch_token = await self.get_launch_token(chute, job_id=job_id)
             deployment_id = str(uuid.uuid4())
             service = await k8s.create_service_for_deployment(chute, deployment_id)
-            deployment, k8s_dep, k8s_svc = await k8s.deploy_chute(
+            deployment, k8s_dep = await k8s.deploy_chute(
                 chute.chute_id,
                 server.server_id,
                 deployment_id,
@@ -557,6 +571,71 @@ class Gepetto:
             if deployment:
                 await self.undeploy(deployment.deployment_id)
             await self.release_job(chute, job_id)
+
+    async def chute_updated(self, event_data: Dict[str, Any]):
+        """
+        Chute has been updated.
+        """
+        chute_id = event_data["chute_id"]
+        version = event_data["version"]
+        validator_hotkey = event_data["validator"]
+
+        if (validator := validator_by_hotkey(validator_hotkey)) is None:
+            logger.warning(f"Validator not found: {validator_hotkey}")
+            return
+
+        # Reload the definition directly from the validator.
+        chute_dict = None
+        try:
+            async with aiohttp.ClientSession(raise_for_status=True) as session:
+                headers, _ = sign_request(purpose="miner")
+                async with session.get(
+                    f"{validator.api}/miner/chutes/{chute_id}/{version}", headers=headers
+                ) as resp:
+                    chute_dict = await resp.json()
+        except Exception:
+            logger.error(f"Error loading remote chute data: {chute_id=} {version=}")
+            return
+
+        # Upsert the chute in the local DB.
+        async with get_session() as db:
+            chute = (
+                (await db.execute(select(Chute).where(Chute.chute_id == chute_id)))
+                .unique()
+                .scalar_one_or_none()
+            )
+            if chute:
+                for key in (
+                    "image",
+                    "code",
+                    "filename",
+                    "ref_str",
+                    "version",
+                    "supported_gpus",
+                    "chutes_version",
+                ):
+                    setattr(chute, key, chute_dict.get(key))
+                chute.gpu_count = chute_dict["node_selector"]["gpu_count"]
+                chute.ban_reason = None
+            else:
+                chute = Chute(
+                    chute_id=chute_id,
+                    validator=validator.hotkey,
+                    name=chute_dict["name"],
+                    image=chute_dict["image"],
+                    code=chute_dict["code"],
+                    filename=chute_dict["filename"],
+                    ref_str=chute_dict["ref_str"],
+                    version=chute_dict["version"],
+                    supported_gpus=chute_dict["supported_gpus"],
+                    gpu_count=chute_dict["node_selector"]["gpu_count"],
+                    chutes_version=chute_dict["chutes_version"],
+                    ban_reason=None,
+                )
+                db.add(chute)
+            await db.commit()
+            await db.refresh(chute)
+            await k8s.create_code_config_map(chute)
 
     async def job_created(self, event_data: Dict[str, Any]):
         """
@@ -838,6 +917,11 @@ class Gepetto:
             await session.refresh(chute)
 
         await k8s.create_code_config_map(chute)
+
+        # Don't deploy if this is a job-only chute, i.e. it has no "cords" to serve
+        # so there's nothing to deploy.
+        if event_data.get("job_only"):
+            return
 
         # This should never be anything other than 0, but just in case...
         current_count = await self.count_deployments(chute.chute_id, chute.version, chute.validator)
@@ -1155,6 +1239,11 @@ class Gepetto:
             for deployment in sorted(
                 server.deployments, key=lambda d: chute_values.get(d.chute_id, 0.0)
             ):
+                # Never preempt jobs.
+                if deployment.job_id:
+                    logger.warning(f"Cannot preempt job deployments: {deployment.job_id=}")
+                    continue
+
                 # Make sure we aren't pointlessly preempting (already have a deployment in progress).
                 if deployment.chute_id == chute.chute_id:
                     logger.warning(
@@ -1173,7 +1262,7 @@ class Gepetto:
                 age = datetime.now(timezone.utc).replace(
                     tzinfo=None
                 ) - deployment.verified_at.replace(tzinfo=None)
-                if age <= timedelta(minutes=5):
+                if age <= timedelta(minutes=60):
                     logger.warning(
                         f"Cannot preempt {deployment.deployment_id=}, verification age is only {age}"
                     )
@@ -1321,7 +1410,7 @@ class Gepetto:
                             launch_token = await self.get_launch_token(chute)
                             deployment_id = str(uuid.uuid4())
                             service = await k8s.create_service_for_deployment(chute, deployment_id)
-                            deployment, k8s_dep, k8s_svc = await k8s.deploy_chute(
+                            deployment, k8s_dep = await k8s.deploy_chute(
                                 chute.chute_id,
                                 server.server_id,
                                 deployment_id,

@@ -306,11 +306,16 @@ async def create_service_for_deployment(
                 "chutes/deployment-id": deployment_id,
             },
             ports=[
-                V1ServicePort(port=8000, target_port=8000, protocol="TCP"),
-                V1ServicePort(port=8001, target_port=8001, protocol="TCP"),
+                V1ServicePort(port=8000, target_port=8000, protocol="TCP", name="chute-8000"),
+                V1ServicePort(port=8001, target_port=8001, protocol="TCP", name="chute-8001"),
             ]
             + [
-                V1ServicePort(port=svc["port"], target_port=svc["port"], protocol=svc["proto"])
+                V1ServicePort(
+                    port=svc["port"],
+                    target_port=svc["port"],
+                    protocol=svc["proto"],
+                    name=f"chute-{svc['port']}",
+                )
                 for svc in extra_service_ports
             ],
         ),
@@ -583,7 +588,8 @@ async def _deploy_chute(
                                 ),
                                 V1EnvVar(name="HF_HOME", value="/cache"),
                                 V1EnvVar(name="CIVITAI_HOME", value="/cache/civitai"),
-                            ],
+                            ]
+                            + extra_env,
                             resources=V1ResourceRequirements(
                                 requests={
                                     "cpu": cpu,
