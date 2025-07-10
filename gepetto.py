@@ -1527,7 +1527,7 @@ class Gepetto:
                     )
                     await session.delete(deployment)
 
-                # Check for crashlooping deployments.
+                # Check for terminated jobs or jobs that never started.
                 if (
                     not deployment.active
                     or not deployment.verified_at
@@ -1539,31 +1539,63 @@ class Gepetto:
                         if "Not Found" in str(exc) or "(404)" in str(exc):
                             await self.undeploy(deployment.deployment_id)
                         continue
-
                     destroyed = False
-                    for pod in kd["pods"]:
-                        if (
-                            pod["restart_count"] > 3
-                            and pod.get("state", {}).get("waiting", {}).get("reason")
-                            == "CrashLoopBackOff"
-                        ):
-                            logger.warning(
-                                f"Deployment cannot run, purging: {deployment.deployment_id} and banning {deployment.chute_id=}"
-                            )
-                            await self.undeploy(deployment.deployment_id)
-                            destroyed = True
+                    job_status = kd.get("status", {})
 
-                            # Blacklist chutes that crashloop, although this could be dangerous if the crashes
-                            # are not because of the chutes themselves...
-                            if (
-                                chute := await self.load_chute(
-                                    deployment.chute_id, deployment.version, deployment.validator
-                                )
-                            ) is not None:
-                                chute.ban_reason = (
-                                    "Chute reached crashloop/terminated state and never ran."
-                                )
-                            break
+                    # Successful terminations would be from chute jobs, not normal chutes.
+                    if job_status.get("succeeded", 0) > 0:
+                        logger.info(f"Job completed successfully: {deployment.deployment_id}")
+                        await self.undeploy(deployment.deployment_id)
+                        destroyed = True
+
+                    # Failed jobs.
+                    elif job_status.get("failed", 0) > 0:
+                        logger.warning(f"Job failed: {deployment.deployment_id}")
+                        await self.undeploy(deployment.deployment_id)
+                        destroyed = True
+
+                        # XXX Ban??? Probably not, but could do.
+                        # if (
+                        #     chute := await self.load_chute(
+                        #         deployment.chute_id, deployment.version, deployment.validator
+                        #     )
+                        # ) is not None:
+                        #     chute.ban_reason = (
+                        #         "Chute job failed and never ran successfully."
+                        #     )
+
+                    # Check for pods that are in error states (since Jobs won't restart)
+                    if not destroyed:
+                        for pod in kd["pods"]:
+                            pod_state = pod.get("state", {})
+                            if pod_state.get("terminated"):
+                                terminated = pod_state["terminated"]
+                                exit_code = terminated.get("exit_code", 0)
+                                if exit_code == 0:
+                                    logger.info(
+                                        f"Job pod completed successfully: {deployment.deployment_id}"
+                                    )
+                                    await self.undeploy(deployment.deployment_id)
+                                    destroyed = True
+                                else:
+                                    # Non-zero exit code indicates failure
+                                    logger.warning(
+                                        f"Job pod terminated with error: {deployment.deployment_id}, exit_code={exit_code}"
+                                    )
+                                    await self.undeploy(deployment.deployment_id)
+                                    destroyed = True
+
+                                    # XXX Ban??? Probably not, but could do.
+                                    # if (
+                                    #     chute := await self.load_chute(
+                                    #         deployment.chute_id, deployment.version, deployment.validator
+                                    #     )
+                                    # ) is not None:
+                                    #     chute.ban_reason = (
+                                    #         f"Chute terminated with exit code {exit_code}."
+                                    #     )
+                                break
+
                     if destroyed:
                         continue
 

@@ -1,5 +1,5 @@
 """
-Helper for kubernetes interactions.
+Helper for kubernetes interactions (now using jobs instead of deployments).
 """
 
 import math
@@ -9,11 +9,10 @@ from loguru import logger
 from typing import List, Dict, Any
 from kubernetes import watch
 from kubernetes.client import (
-    V1Deployment,
+    V1Job,
+    V1JobSpec,
     V1Service,
     V1ObjectMeta,
-    V1DeploymentSpec,
-    V1DeploymentStrategy,
     V1PodTemplateSpec,
     V1PodSpec,
     V1Container,
@@ -39,7 +38,7 @@ from api.database import get_session
 from api.server.schemas import Server
 from api.chute.schemas import Chute
 from api.deployment.schemas import Deployment
-from api.config import k8s_core_client, k8s_app_client
+from api.config import k8s_core_client, k8s_batch_client
 
 
 async def get_kubernetes_nodes() -> List[Dict]:
@@ -90,40 +89,56 @@ async def get_kubernetes_nodes() -> List[Dict]:
     return nodes
 
 
-def is_deployment_ready(deployment):
+def is_job_ready(job):
     """
-    Check if a deployment is "ready"
+    Check if a job's pod is running and ready
     """
-    return (
-        deployment.status.available_replicas is not None
-        and deployment.status.available_replicas == deployment.spec.replicas
-        and deployment.status.ready_replicas == deployment.spec.replicas
-        and deployment.status.updated_replicas == deployment.spec.replicas
-    )
-
-
-def _extract_deployment_info(deployment: Any) -> Dict:
-    """
-    Extract deployment info from the deployment objects.
-    """
-    deploy_info = {
-        "uuid": deployment.metadata.uid,
-        "deployment_id": deployment.metadata.labels.get("chutes/deployment-id"),
-        "name": deployment.metadata.name,
-        "namespace": deployment.metadata.namespace,
-        "labels": deployment.metadata.labels,
-        "chute_id": deployment.metadata.labels.get("chutes/chute-id"),
-        "version": deployment.metadata.labels.get("chutes/version"),
-        "node_selector": deployment.spec.template.spec.node_selector,
-    }
-    deploy_info["ready"] = is_deployment_ready(deployment)
-    pod_label_selector = ",".join(
-        [f"{k}={v}" for k, v in deployment.spec.selector.match_labels.items()]
-    )
+    # Get pods for this job
+    pod_label_selector = f"chutes/deployment-id={job.metadata.labels.get('chutes/deployment-id')}"
     pods = k8s_core_client().list_namespaced_pod(
-        namespace=deployment.metadata.namespace, label_selector=pod_label_selector
+        namespace=job.metadata.namespace, label_selector=pod_label_selector
     )
-    deploy_info["pods"] = []
+
+    for pod in pods.items:
+        if pod.status.phase == "Running":
+            # Check if all containers are ready
+            if pod.status.container_statuses:
+                all_ready = all(cs.ready for cs in pod.status.container_statuses)
+                if all_ready:
+                    return True
+    return False
+
+
+def _extract_job_info(job: Any) -> Dict:
+    """
+    Extract job info from the job objects.
+    """
+    job_info = {
+        "uuid": job.metadata.uid,
+        "deployment_id": job.metadata.labels.get("chutes/deployment-id"),
+        "name": job.metadata.name,
+        "namespace": job.metadata.namespace,
+        "labels": job.metadata.labels,
+        "chute_id": job.metadata.labels.get("chutes/chute-id"),
+        "version": job.metadata.labels.get("chutes/version"),
+        "node_selector": job.spec.template.spec.node_selector,
+    }
+
+    # Job status information
+    job_info["ready"] = is_job_ready(job)
+    job_info["status"] = {
+        "active": job.status.active or 0,
+        "succeeded": job.status.succeeded or 0,
+        "failed": job.status.failed or 0,
+        "completion_time": job.status.completion_time,
+        "start_time": job.status.start_time,
+    }
+
+    pod_label_selector = f"chutes/deployment-id={job.metadata.labels.get('chutes/deployment-id')}"
+    pods = k8s_core_client().list_namespaced_pod(
+        namespace=job.metadata.namespace, label_selector=pod_label_selector
+    )
+    job_info["pods"] = []
     for pod in pods.items:
         state = pod.status.container_statuses[0].state if pod.status.container_statuses else None
         last_state = (
@@ -156,37 +171,38 @@ def _extract_deployment_info(deployment: Any) -> Dict:
             if last_state
             else None,
         }
-        deploy_info["pods"].append(pod_info)
-        deploy_info["node"] = pod.spec.node_name
-    return deploy_info
+        job_info["pods"].append(pod_info)
+        job_info["node"] = pod.spec.node_name
+    return job_info
 
 
 async def get_deployment(deployment_id: str):
     """
-    Get a single deployment by ID.
+    Get a single job by deployment ID.
     """
-    deployment = k8s_app_client().read_namespaced_deployment(
+    job = k8s_batch_client().read_namespaced_job(
         namespace=settings.namespace,
         name=f"chute-{deployment_id}",
     )
-    return _extract_deployment_info(deployment)
+    return _extract_job_info(job)
+
+
+get_job = get_deployment
 
 
 async def get_deployed_chutes() -> List[Dict]:
     """
-    Get all chutes deployments from kubernetes.
+    Get all chutes jobs from kubernetes.
     """
-    deployments = []
+    jobs = []
     label_selector = "chutes/chute=true"
-    deployment_list = k8s_app_client().list_namespaced_deployment(
+    job_list = k8s_batch_client().list_namespaced_job(
         namespace=settings.namespace, label_selector=label_selector
     )
-    for deployment in deployment_list.items:
-        deployments.append(_extract_deployment_info(deployment))
-        logger.info(
-            f"Found chute deployment: {deployment.metadata.name} in namespace {deployment.metadata.namespace}"
-        )
-    return deployments
+    for job in job_list.items:
+        jobs.append(_extract_job_info(job))
+        logger.info(f"Found chute job: {job.metadata.name} in namespace {job.metadata.namespace}")
+    return jobs
 
 
 async def delete_code(chute_id: str, version: str):
@@ -244,15 +260,16 @@ async def wait_for_deletion(label_selector: str, timeout_seconds: int = 120):
 
 async def undeploy(deployment_id: str):
     """
-    Delete a deployment, and associated service.
+    Delete a job, and associated service.
     """
     try:
-        k8s_app_client().delete_namespaced_deployment(
+        k8s_batch_client().delete_namespaced_job(
             name=f"chute-{deployment_id}",
             namespace=settings.namespace,
+            propagation_policy="Foreground",
         )
     except Exception as exc:
-        logger.warning(f"Error deleting deployment from k8s: {exc}")
+        logger.warning(f"Error deleting job from k8s: {exc}")
     await cleanup_service(deployment_id)
     await wait_for_deletion(f"chutes/deployment-id={deployment_id}", timeout_seconds=15)
 
@@ -342,7 +359,7 @@ async def _deploy_chute(
     extra_labels: dict[str, str] = {},
 ):
     """
-    Deploy a chute!
+    Deploy a chute as a Job!
     """
     # Backwards compatible types...
     if isinstance(chute_id, Chute):
@@ -391,7 +408,7 @@ async def _deploy_chute(
         deployment.gpus = gpus
         await session.commit()
 
-    # Create the deployment.
+    # Create the job.
     cpu = str(server.cpu_per_gpu * chute.gpu_count)
     ram = str(server.memory_per_gpu * chute.gpu_count) + "Gi"
     code_uuid = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{chute.chute_id}::{chute.version}"))
@@ -443,16 +460,17 @@ async def _deploy_chute(
         server.validator,
     ]
 
-    # Create the deployment object.
-    deployment = V1Deployment(
+    # Create the job object.
+    job = V1Job(
         metadata=V1ObjectMeta(
             name=f"chute-{deployment_id}",
             labels=deployment_labels,
         ),
-        spec=V1DeploymentSpec(
-            replicas=1,
-            strategy=V1DeploymentStrategy(type="Recreate"),
-            selector={"matchLabels": {"chutes/deployment-id": deployment_id}},
+        spec=V1JobSpec(
+            parallelism=1,
+            completions=1,
+            backoff_limit=0,
+            ttl_seconds_after_finished=300,
             template=V1PodTemplateSpec(
                 metadata=V1ObjectMeta(
                     labels=deployment_labels,
@@ -463,6 +481,7 @@ async def _deploy_chute(
                     },
                 ),
                 spec=V1PodSpec(
+                    restart_policy="Never",
                     node_name=server.name,
                     runtime_class_name="nvidia-container-runtime",
                     volumes=[
@@ -644,10 +663,10 @@ async def _deploy_chute(
         ),
     )
 
-    # Create the deployment in k8s.
+    # Create the job in k8s.
     try:
-        created_deployment = k8s_app_client().create_namespaced_deployment(
-            namespace=settings.namespace, body=deployment
+        created_job = k8s_batch_client().create_namespaced_job(
+            namespace=settings.namespace, body=job
         )
 
         # Track the primary port in the database.
@@ -670,12 +689,13 @@ async def _deploy_chute(
             await session.commit()
             await session.refresh(deployment)
 
-        return deployment, created_deployment
+        return deployment, created_job
     except ApiException as exc:
         try:
-            k8s_core_client().delete_namespaced_deployment(
+            k8s_batch_client().delete_namespaced_job(
                 name=f"chute-{deployment_id}",
                 namespace=settings.namespace,
+                propagation_policy="Foreground",
             )
         except Exception:
             ...
@@ -686,7 +706,7 @@ async def _deploy_chute(
 
 async def cleanup_service(deployment_id: str):
     """
-    Delete the k8s service associated with a depoyment.
+    Delete the k8s service associated with a deployment.
     """
     try:
         k8s_core_client().delete_namespaced_service(

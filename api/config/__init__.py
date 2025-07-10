@@ -45,6 +45,11 @@ def k8s_app_client():
     return create_kubernetes_client(cls=client.AppsV1Api)
 
 
+@lru_cache(maxsize=1)
+def k8s_batch_client():
+    return create_kubernetes_client(cls=client.BatchV1Api)
+
+
 @lru_cache(maxsize=32)
 def validator_by_hotkey(hotkey: str):
     valis = [validator for validator in settings.validators if validator.hotkey == hotkey]
