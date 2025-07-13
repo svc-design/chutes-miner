@@ -148,6 +148,23 @@ class Gepetto:
             ).scalar()
 
     @staticmethod
+    async def count_non_job_deployments(chute_id: str, version: str, validator: str):
+        """
+        Helper to get the number of non-job deployments for a chute.
+        """
+        async with get_session() as session:
+            return (
+                await session.execute(
+                    select(func.count())
+                    .select_from(Deployment)
+                    .where(Deployment.chute_id == chute_id)
+                    .where(Deployment.version == version)
+                    .where(Deployment.validator == validator)
+                    .where(Deployment.job_id.is_(None))
+                )
+            ).scalar()
+
+    @staticmethod
     async def get_chute(chute_id: str, validator: str) -> Optional[Chute]:
         """
         Load a chute by ID.
@@ -289,6 +306,7 @@ class Gepetto:
                     ),
                     Deployment.stub.is_(False),
                     Deployment.instance_id.is_not(None),
+                    Deployment.job_id.is_(None),  # Skip job deployments in activator
                 )
                 async with get_session() as session:
                     deployments = (await session.execute(query)).unique().scalars()
@@ -358,8 +376,8 @@ class Gepetto:
                     if scalable.get(validator, {}).get(chute_id) not in (None, True):
                         continue
 
-                    # Count how many deployments we already have.
-                    local_count = await self.count_deployments(
+                    # Count how many deployments we already have (excluding jobs).
+                    local_count = await self.count_non_job_deployments(
                         chute_id, chute_info["version"], validator
                     )
                     if local_count >= 3:
@@ -424,7 +442,7 @@ class Gepetto:
                 best_validator,
             )
         ) is not None:
-            current_count = await self.count_deployments(
+            current_count = await self.count_non_job_deployments(
                 best_chute_id, chute.version, best_validator
             )
             logger.info(f"Scaling up {best_chute_id} for validator {best_validator}")
@@ -843,8 +861,9 @@ class Gepetto:
         chute_ids = event_data.get("chute_ids", [])
         if chute_ids:
             async with get_session() as session:
-                await session.execute(text("UPDATE chutes SET image = :image WHERE chute_id = ANY(:chute_ids)"),
-                    {"image": event_data.get("image"), "chute_ids": chute_ids}
+                await session.execute(
+                    text("UPDATE chutes SET image = :image WHERE chute_id = ANY(:chute_ids)"),
+                    {"image": event_data.get("image"), "chute_ids": chute_ids},
                 )
                 await session.commit()
 
@@ -941,7 +960,9 @@ class Gepetto:
             return
 
         # This should never be anything other than 0, but just in case...
-        current_count = await self.count_deployments(chute.chute_id, chute.version, chute.validator)
+        current_count = await self.count_non_job_deployments(
+            chute.chute_id, chute.version, chute.validator
+        )
         if not current_count:
             await self.scale_chute(chute, desired_count=desired_count, preempt=False)
 
@@ -1094,6 +1115,7 @@ class Gepetto:
             .join(gpu_counts, Server.server_id == gpu_counts.c.server_id)
             .where(Server.locked.is_(False))
             .where(Deployment.chute_id == chute.chute_id)
+            .where(Deployment.job_id.is_(None))  # Don't scale down job deployments
             .where(Deployment.created_at <= func.now() - timedelta(minutes=5))
             .order_by(text("removal_score DESC"))
             .limit(1)
@@ -1385,7 +1407,7 @@ class Gepetto:
         """
         async with self._scale_lock:
             while (
-                current_count := await self.count_deployments(
+                current_count := await self.count_non_job_deployments(
                     chute.chute_id, chute.version, chute.validator
                 )
             ) != desired_count:
@@ -1497,6 +1519,42 @@ class Gepetto:
                 remote = (self.remote_chutes.get(deployment.validator) or {}).get(
                     deployment.chute_id
                 )
+
+                # Special handling for deployments with job_id
+                if hasattr(deployment, "job_id") and deployment.job_id:
+                    # If deployment has a job_id and it's still in remote inventory, keep it
+                    if remote:
+                        logger.info(
+                            f"Keeping deployment with job_id={deployment.job_id} for chute {deployment.chute_id} (remote version={remote.get('version')}, local version={deployment.version})"
+                        )
+                        all_deployments.add(deployment.deployment_id)
+                        if deployment.instance_id:
+                            all_instances.add(deployment.instance_id)
+                        continue
+                    else:
+                        # Job deployment not in remote inventory anymore
+                        logger.warning(
+                            f"Job deployment {deployment.deployment_id} with job_id={deployment.job_id} not found in remote inventory"
+                        )
+                        identifier = (
+                            f"{deployment.validator}:{deployment.chute_id}:{deployment.version}"
+                        )
+                        if identifier not in chutes_to_remove:
+                            chutes_to_remove.add(identifier)
+                            tasks.append(
+                                asyncio.create_task(
+                                    self.chute_deleted(
+                                        {
+                                            "chute_id": deployment.chute_id,
+                                            "version": deployment.version,
+                                            "validator": deployment.validator,
+                                        }
+                                    )
+                                )
+                            )
+                        continue
+
+                # Normal deployment handling (no job_id)
                 if not remote or remote["version"] != deployment.version:
                     update = updating.get(deployment.validator, {}).get(deployment.chute_id)
                     if update:
@@ -1526,6 +1584,7 @@ class Gepetto:
                         )
 
                 # Delete any deployments from the DB that either never made it past the stub stage or that aren't in k8s anymore.
+                # This applies to ALL deployments, including those with job_id
                 if not deployment.stub and deployment.deployment_id not in k8s_chute_ids:
                     logger.warning(
                         f"Deployment has disappeared from kubernetes: {deployment.deployment_id}"
