@@ -70,6 +70,7 @@ class SocketClient:
                 "bounty_change",
                 "image_created",
                 "image_deleted",
+                "image_updated",
                 "instance_deleted",
                 "instance_verified",
                 "rolling_update",

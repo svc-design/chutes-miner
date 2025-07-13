@@ -57,6 +57,7 @@ class Gepetto:
         self.pubsub.on_event("bounty_change")(self.bounty_changed)
         self.pubsub.on_event("image_deleted")(self.image_deleted)
         self.pubsub.on_event("image_created")(self.image_created)
+        self.pubsub.on_event("image_updated")(self.image_updated)
         self.pubsub.on_event("job_created")(self.job_created)
         self.pubsub.on_event("job_deleted")(self.job_deleted)
         self.pubsub.on_event("chute_updated")(self.chute_updated)
@@ -834,6 +835,19 @@ class Gepetto:
             f"Image created, but I'm going to lazy load the image when chutes are created: {event_data}"
         )
 
+    async def image_updated(self, event_data: Dict[str, Any]):
+        """
+        Image was updated, i.e. the chutes version of an image was upgraded.
+        """
+        logger.info(f"Image updated: {event_data}")
+        chute_ids = event_data.get("chute_ids", [])
+        if chute_ids:
+            async with get_session() as session:
+                await session.execute(text("UPDATE chutes SET image = :image WHERE chute_id = ANY(:chute_ids)"),
+                {"image": event_data.get("image"), "chute_ids": chute_ids}
+            )
+            await session.commit()
+
     async def chute_deleted(self, event_data: Dict[str, Any]):
         """
         A chute (or specific version of a chute) was removed from validator inventory.
@@ -940,7 +954,11 @@ class Gepetto:
             version = event_data["new_version"]
             validator_hotkey = event_data["validator"]
             instance_id = event_data["instance_id"]
-            logger.info(f"Received rolling update event for {chute_id=} {version=} {instance_id=}")
+            image = event_data.get("image", None)
+            reason = event_data.get("reason", "chute updated")
+            logger.info(
+                f"Received rolling update event for {chute_id=} {version=} {instance_id=}, {reason=}, {image=}"
+            )
 
             if (validator := validator_by_hotkey(validator_hotkey)) is None:
                 logger.warning(f"Validator not found: {validator_hotkey}")
