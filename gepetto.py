@@ -844,9 +844,9 @@ class Gepetto:
         if chute_ids:
             async with get_session() as session:
                 await session.execute(text("UPDATE chutes SET image = :image WHERE chute_id = ANY(:chute_ids)"),
-                {"image": event_data.get("image"), "chute_ids": chute_ids}
-            )
-            await session.commit()
+                    {"image": event_data.get("image"), "chute_ids": chute_ids}
+                )
+                await session.commit()
 
     async def chute_deleted(self, event_data: Dict[str, Any]):
         """
