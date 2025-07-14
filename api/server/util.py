@@ -319,7 +319,10 @@ async def deploy_graval(
 
 
 async def track_server(
-    validator: str, hourly_cost: float, node_object: V1Node, add_labels: Dict[str, str] = None
+    validator: str,
+    hourly_cost: float,
+    node_object: V1Node,
+    add_labels: Dict[str, str] = None,
 ) -> Tuple[V1Node, Server]:
     """
     Track a new kubernetes (worker/GPU) node in our inventory.

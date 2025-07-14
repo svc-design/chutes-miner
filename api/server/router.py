@@ -128,7 +128,8 @@ async def preflight_delete_check(
         (
             await db.execute(
                 select(Deployment).where(
-                    Deployment.server_id == server.server_id, not Deployment.job_id.is_(None)
+                    Deployment.server_id == server.server_id,
+                    not Deployment.job_id.is_(None),
                 )
             )
         )

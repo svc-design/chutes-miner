@@ -464,7 +464,8 @@ def unlock_server(
 app.command(name="add-node", help="Add a new kubernetes node to your cluster")(add_node)
 app.command(name="delete-node", help="Delete a kubernetes node from your cluster")(delete_node)
 app.command(
-    name="purge-deployments", help="Purge all deployments, allowing autoscale from scratch"
+    name="purge-deployments",
+    help="Purge all deployments, allowing autoscale from scratch",
 )(purge_deployments)
 app.command(name="purge-deployment", help="Purge the target deployment")(purge_deployment)
 app.command(name="local-inventory", help="Show local inventory")(local_inventory)

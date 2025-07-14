@@ -88,13 +88,16 @@ class Gepetto:
         async with aiohttp.ClientSession(raise_for_status=True) as session:
             headers, _ = sign_request(purpose="miner")
             updated_items = {}
+            explicit_null = False
             async with session.get(url, headers=headers) as resp:
                 async for content_enc in resp.content:
                     content = content_enc.decode()
-                    if content.startswith("data: "):
+                    if content.startswith("data: {"):
                         data = json.loads(content[6:])
                         updated_items[data[id_key]] = data
-            if updated_items:
+                    elif content.startswith("data: NO_ITEMS"):
+                        explicit_null = True
+            if updated_items or explicit_null:
                 pointer[hotkey] = updated_items
 
     async def remote_refresh_all(self):
@@ -339,7 +342,10 @@ class Gepetto:
         """
         for validator in settings.validators:
             await self._remote_refresh_objects(
-                self.remote_metrics, validator.hotkey, f"{validator.api}/miner/metrics/", "chute_id"
+                self.remote_metrics,
+                validator.hotkey,
+                f"{validator.api}/miner/metrics/",
+                "chute_id",
             )
 
         # Load chute utilization to see if it can scale.
@@ -630,7 +636,8 @@ class Gepetto:
             async with aiohttp.ClientSession(raise_for_status=True) as session:
                 headers, _ = sign_request(purpose="miner")
                 async with session.get(
-                    f"{validator.api}/miner/chutes/{chute_id}/{version}", headers=headers
+                    f"{validator.api}/miner/chutes/{chute_id}/{version}",
+                    headers=headers,
                 ) as resp:
                     chute_dict = await resp.json()
         except Exception:
@@ -943,7 +950,8 @@ class Gepetto:
             async with aiohttp.ClientSession(raise_for_status=True) as session:
                 headers, _ = sign_request(purpose="miner")
                 async with session.get(
-                    f"{validator.api}/miner/chutes/{chute_id}/{version}", headers=headers
+                    f"{validator.api}/miner/chutes/{chute_id}/{version}",
+                    headers=headers,
                 ) as resp:
                     chute_dict = await resp.json()
         except Exception:
@@ -1010,7 +1018,8 @@ class Gepetto:
                     (
                         await session.execute(
                             select(Deployment).where(
-                                Deployment.instance_id == instance_id, Deployment.job_id.is_(None)
+                                Deployment.instance_id == instance_id,
+                                Deployment.job_id.is_(None),
                             )
                         )
                     )
@@ -1029,7 +1038,8 @@ class Gepetto:
                     async with aiohttp.ClientSession(raise_for_status=True) as session:
                         headers, _ = sign_request(purpose="miner")
                         async with session.get(
-                            f"{validator.api}/miner/chutes/{chute_id}/{version}", headers=headers
+                            f"{validator.api}/miner/chutes/{chute_id}/{version}",
+                            headers=headers,
                         ) as resp:
                             chute_dict = await resp.json()
                 except Exception:
@@ -1180,8 +1190,14 @@ class Gepetto:
                 ).label("free_gpus"),
             )
             .select_from(Server)
-            .join(total_gpus_per_server, Server.server_id == total_gpus_per_server.c.server_id)
-            .outerjoin(used_gpus_per_server, Server.server_id == used_gpus_per_server.c.server_id)
+            .join(
+                total_gpus_per_server,
+                Server.server_id == total_gpus_per_server.c.server_id,
+            )
+            .outerjoin(
+                used_gpus_per_server,
+                Server.server_id == used_gpus_per_server.c.server_id,
+            )
             .join(GPU, Server.server_id == GPU.server_id)
             .where(
                 GPU.model_short_ref.in_(supported_gpus),
@@ -1264,8 +1280,14 @@ class Gepetto:
                 ).label("free_gpus"),
             )
             .select_from(Server)
-            .join(total_gpus_per_server, Server.server_id == total_gpus_per_server.c.server_id)
-            .outerjoin(used_gpus_per_server, Server.server_id == used_gpus_per_server.c.server_id)
+            .join(
+                total_gpus_per_server,
+                Server.server_id == total_gpus_per_server.c.server_id,
+            )
+            .outerjoin(
+                used_gpus_per_server,
+                Server.server_id == used_gpus_per_server.c.server_id,
+            )
             .join(GPU, Server.server_id == GPU.server_id)
             .where(
                 GPU.model_short_ref.in_(supported_gpus),
@@ -1874,7 +1896,7 @@ class Gepetto:
         Reconcile on a regular basis.
         """
         while True:
-            await asyncio.sleep(600)
+            await asyncio.sleep(60)
             try:
                 await self.reconcile()
             except Exception as exc:

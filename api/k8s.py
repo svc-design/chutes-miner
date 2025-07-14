@@ -513,7 +513,8 @@ async def _deploy_chute(
                         V1Volume(
                             name="cache",
                             host_path=V1HostPathVolumeSource(
-                                path=f"/var/snap/cache/{chute.chute_id}", type="DirectoryOrCreate"
+                                path=f"/var/snap/cache/{chute.chute_id}",
+                                type="DirectoryOrCreate",
                             ),
                         ),
                         V1Volume(
