@@ -274,6 +274,21 @@ async def undeploy(deployment_id: str):
     await wait_for_deletion(f"chutes/deployment-id={deployment_id}", timeout_seconds=15)
 
 
+async def get_pods_by_label(label_selector: str):
+    """
+    Get all pods matching a label selector.
+    """
+    try:
+        pods = k8s_core_client().list_namespaced_pod(
+            namespace=settings.namespace,
+            label_selector=label_selector,
+        )
+        return [pod.to_dict() for pod in pods.items]
+    except Exception as exc:
+        logger.error(f"Error getting pods by label {label_selector}: {exc}")
+        return []
+
+
 async def create_code_config_map(chute: Chute):
     """
     Create a ConfigMap to store the chute code.
@@ -356,6 +371,7 @@ async def _deploy_chute(
     service: Any,
     token: str = None,
     job_id: str = None,
+    config_id: str = None,
     extra_labels: dict[str, str] = {},
 ):
     """
@@ -403,6 +419,7 @@ async def _deploy_chute(
             verified_at=None,
             stub=True,
             job_id=job_id,
+            config_id=config_id,
         )
         session.add(deployment)
         deployment.gpus = gpus
@@ -418,6 +435,8 @@ async def _deploy_chute(
         "chutes/chute-id": chute.chute_id,
         "chutes/version": chute.version,
     }
+    if config_id:
+        deployment_labels["chutes/config-id"] = config_id
 
     # Command will vary depending on chutes version.
     extra_env = []
@@ -724,6 +743,7 @@ async def deploy_chute(
     service: Any,
     token: str = None,
     job_id: str = None,
+    config_id: str = None,
     extra_labels: dict[str, str] = {},
 ):
     """
@@ -738,6 +758,7 @@ async def deploy_chute(
             token=token,
             extra_labels=extra_labels,
             job_id=job_id,
+            config_id=config_id,
         )
     except Exception as exc:
         logger.warning(

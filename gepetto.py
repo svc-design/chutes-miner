@@ -49,6 +49,7 @@ class Gepetto:
         self.pubsub.on_event("gpu_verified")(self.gpu_verified)
         self.pubsub.on_event("server_deleted")(self.server_deleted)
         self.pubsub.on_event("gpu_deleted")(self.gpu_deleted)
+        self.pubsub.on_event("instance_created")(self.instance_created)
         self.pubsub.on_event("instance_verified")(self.instance_verified)
         self.pubsub.on_event("instance_deleted")(self.instance_deleted)
         self.pubsub.on_event("rolling_update")(self.rolling_update)
@@ -250,7 +251,7 @@ class Gepetto:
                             f"Failed to fetch launch token: {resp.status=} -> {await resp.text()}"
                         )
                     resp.raise_for_status()
-                    return (await resp.json())["token"]
+                    return await resp.json()
         except Exception as exc:
             logger.warning(f"Unable to fetch launch config token: {exc}")
             raise DeploymentFailure(f"Failed to fetch JWT for launch: {exc}")
@@ -531,11 +532,27 @@ class Gepetto:
             await session.commit()
         # Nothing to do here really, the autoscaler should take care of it, but feel free to change...
 
+    async def instance_created(self, event_data):
+        """
+        Instance has been created - only relevant when using new launch config system.
+        """
+        if event_data["miner_hotkey"] != settings.miner_ss58:
+            return
+        logger.info(f"Received instance_created event: {event_data}")
+        async with get_session() as session:
+            await session.execute(
+                update(Deployment)
+                .where(Deployment.config_id == event_data["config_id"])
+                .values({"instance_id": event_data["instance_id"]})
+            )
+
     async def instance_verified(self, event_data):
         """
         Validator has finished verifying an instance/deployment, so it should start receiving requests.
         """
         logger.info(f"Received instance_verified event: {event_data}")
+        if event_data["miner_hotkey"] != settings.miner_ss58:
+            return
         async with get_session() as session:
             await session.execute(
                 update(Deployment)
@@ -576,7 +593,8 @@ class Gepetto:
                 server.server_id,
                 deployment_id,
                 service,
-                token=launch_token,
+                token=launch_token["token"] if launch_token else None,
+                config_id=launch_token["config_id"] if launch_token else None,
                 job_id=job_id,
                 extra_labels={"chutes/job": "true"},
             )
@@ -1070,7 +1088,8 @@ class Gepetto:
                         server_id,
                         deployment_id,
                         service,
-                        token=launch_token,
+                        token=launch_token["token"] if launch_token else None,
+                        config_id=launch_token["config_id"] if launch_token else None,
                     )
                     logger.success(
                         f"Successfully updated {chute_id=} to {version=} on {server_id=}: {deployment.deployment_id=}"
@@ -1383,7 +1402,8 @@ class Gepetto:
                 target_server.server_id,
                 deployment_id,
                 service,
-                token=launch_token,
+                token=launch_token["token"] if launch_token else None,
+                config_id=launch_token["config_id"] if launch_token else None,
             )
             logger.success(
                 f"Successfully deployed {chute.chute_id=} {job_id=} via preemption on {server.server_id=}: {deployment.deployment_id=}"
@@ -1458,7 +1478,8 @@ class Gepetto:
                                 server.server_id,
                                 deployment_id,
                                 service,
-                                token=launch_token,
+                                token=launch_token["token"] if launch_token else None,
+                                config_id=launch_token["config_id"] if launch_token else None,
                             )
                             logger.success(
                                 f"Successfully deployed {chute.chute_id=} on {server.server_id=}: {deployment.deployment_id=}"
@@ -1498,12 +1519,37 @@ class Gepetto:
         all_chutes = set()
         all_deployments = set()
         all_instances = set()
+        all_configs = set()
         k8s_chutes = await k8s.get_deployed_chutes()
         k8s_chute_ids = {c["deployment_id"] for c in k8s_chutes}
+
+        # Get all pods with config_id labels for orphan detection
+        k8s_config_ids = set()
+        try:
+            pods = await k8s.get_pods_by_label("chutes/config-id")
+            k8s_config_ids = {pod["metadata"]["labels"]["chutes/config-id"] for pod in pods}
+        except Exception as exc:
+            logger.error(f"Failed to get pods by config-id label: {exc}")
+
         async with get_session() as session:
             # Clean up based on deployments/instances.
             async for row in (await session.stream(select(Deployment))).unique():
                 deployment = row[0]
+
+                # Early check for orphaned deployments with config_id
+                if deployment.config_id and deployment.config_id not in k8s_config_ids:
+                    logger.warning(
+                        f"Deployment {deployment.deployment_id} has config_id={deployment.config_id} but no matching pod in k8s, cleaning up"
+                    )
+                    if deployment.instance_id:
+                        if (vali := validator_by_hotkey(deployment.validator)) is not None:
+                            await self.purge_validator_instance(
+                                vali, deployment.chute_id, deployment.instance_id
+                            )
+                    await session.delete(deployment)
+                    continue
+
+                # Check if instance exists on validator
                 if deployment.instance_id and deployment.instance_id not in (
                     self.remote_instances.get(deployment.validator) or {}
                 ):
@@ -1515,24 +1561,31 @@ class Gepetto:
                             self.instance_deleted({"instance_id": deployment.instance_id})
                         )
                     )
+                    # Skip the rest of processing for this deployment since instance is gone
+                    continue
 
                 remote = (self.remote_chutes.get(deployment.validator) or {}).get(
                     deployment.chute_id
                 )
 
+                # Track deployments by their launch configs.
+                if deployment.config_id:
+                    all_configs.add(deployment.config_id)
+
                 # Special handling for deployments with job_id
                 if hasattr(deployment, "job_id") and deployment.job_id:
-                    # If deployment has a job_id and it's still in remote inventory, keep it
+                    # Always track the instance_id for job deployments to prevent premature purging
+                    if deployment.instance_id:
+                        all_instances.add(deployment.instance_id)
+
                     if remote:
                         logger.info(
                             f"Keeping deployment with job_id={deployment.job_id} for chute {deployment.chute_id} (remote version={remote.get('version')}, local version={deployment.version})"
                         )
                         all_deployments.add(deployment.deployment_id)
-                        if deployment.instance_id:
-                            all_instances.add(deployment.instance_id)
                         continue
                     else:
-                        # Job deployment not in remote inventory anymore
+                        # Chute associated with the job doesn't exist anymore.
                         logger.warning(
                             f"Job deployment {deployment.deployment_id} with job_id={deployment.job_id} not found in remote inventory"
                         )
@@ -1563,6 +1616,7 @@ class Gepetto:
                         if deployment.instance_id:
                             all_instances.add(deployment.instance_id)
                         continue
+
                     logger.warning(
                         f"Chute: {deployment.chute_id} version={deployment.version} on validator {deployment.validator} not found"
                     )
@@ -1582,10 +1636,13 @@ class Gepetto:
                                 )
                             )
                         )
+                    # Don't continue here - we still need to check k8s state and cleanup
 
-                # Delete any deployments from the DB that either never made it past the stub stage or that aren't in k8s anymore.
-                # This applies to ALL deployments, including those with job_id
-                if not deployment.stub and deployment.deployment_id not in k8s_chute_ids:
+                # Check if deployment exists in k8s
+                deployment_in_k8s = deployment.deployment_id in k8s_chute_ids
+
+                # Delete deployments that never made it past stub stage or disappeared from k8s
+                if not deployment.stub and not deployment_in_k8s:
                     logger.warning(
                         f"Deployment has disappeared from kubernetes: {deployment.deployment_id}"
                     )
@@ -1595,20 +1652,24 @@ class Gepetto:
                                 vali, deployment.chute_id, deployment.instance_id
                             )
                     await session.delete(deployment)
+                    continue
 
-                elif (deployment.stub or not deployment.instance_id) and datetime.now(
-                    timezone.utc
-                ) - deployment.created_at >= timedelta(minutes=30):
+                # Clean up old stubs
+                deployment_age = datetime.now(timezone.utc) - deployment.created_at
+                if (deployment.stub or not deployment.instance_id) and deployment_age >= timedelta(
+                    minutes=30
+                ):
                     logger.warning(
                         f"Deployment is still a stub after 30 minutes, deleting! {deployment.deployment_id}"
                     )
                     await session.delete(deployment)
+                    continue
 
-                # Check for terminated jobs or jobs that never started.
+                # Check for terminated jobs or jobs that never started
                 if (
                     not deployment.active
                     or not deployment.verified_at
-                    and datetime.now(timezone.utc) - deployment.created_at >= timedelta(minutes=5)
+                    and deployment_age >= timedelta(minutes=5)
                 ):
                     try:
                         kd = await k8s.get_deployment(deployment.deployment_id)
@@ -1616,16 +1677,15 @@ class Gepetto:
                         if "Not Found" in str(exc) or "(404)" in str(exc):
                             await self.undeploy(deployment.deployment_id)
                         continue
+
                     destroyed = False
                     job_status = kd.get("status", {})
 
-                    # Successful terminations would be from chute jobs, not normal chutes.
+                    # Check job completion status
                     if job_status.get("succeeded", 0) > 0:
                         logger.info(f"Job completed successfully: {deployment.deployment_id}")
                         await self.undeploy(deployment.deployment_id)
                         destroyed = True
-
-                    # Failed jobs.
                     elif job_status.get("failed", 0) > 0:
                         logger.warning(f"Job failed: {deployment.deployment_id}")
                         await self.undeploy(deployment.deployment_id)
@@ -1641,9 +1701,9 @@ class Gepetto:
                         #         "Chute job failed and never ran successfully."
                         #     )
 
-                    # Check for pods that are in error states (since Jobs won't restart)
+                    # Check for terminated pods (for Jobs that don't update status properly)
                     if not destroyed:
-                        for pod in kd["pods"]:
+                        for pod in kd.get("pods", []):
                             pod_state = pod.get("state", {})
                             if pod_state.get("terminated"):
                                 terminated = pod_state["terminated"]
@@ -1652,49 +1712,50 @@ class Gepetto:
                                     logger.info(
                                         f"Job pod completed successfully: {deployment.deployment_id}"
                                     )
-                                    await self.undeploy(deployment.deployment_id)
-                                    destroyed = True
                                 else:
-                                    # Non-zero exit code indicates failure
                                     logger.warning(
                                         f"Job pod terminated with error: {deployment.deployment_id}, exit_code={exit_code}"
                                     )
-                                    await self.undeploy(deployment.deployment_id)
-                                    destroyed = True
+                                await self.undeploy(deployment.deployment_id)
+                                destroyed = True
 
-                                    # XXX Ban??? Probably not, but could do.
-                                    # if (
-                                    #     chute := await self.load_chute(
-                                    #         deployment.chute_id, deployment.version, deployment.validator
-                                    #     )
-                                    # ) is not None:
-                                    #     chute.ban_reason = (
-                                    #         f"Chute terminated with exit code {exit_code}."
-                                    #     )
+                                # XXX Ban??? Probably not, but could do.
+                                # if (
+                                #     chute := await self.load_chute(
+                                #         deployment.chute_id, deployment.version, deployment.validator
+                                #     )
+                                # ) is not None:
+                                #     chute.ban_reason = (
+                                #         f"Chute terminated with exit code {exit_code}."
+                                #     )
                                 break
 
                     if destroyed:
                         continue
 
-                # Track the list of deployments so we can reconcile with k8s state.
+                # Track valid deployments
                 all_deployments.add(deployment.deployment_id)
                 if deployment.instance_id:
                     all_instances.add(deployment.instance_id)
+
             await session.commit()
 
-            # Purge validator instances not deployed locally.
+            # Purge validator instances not deployed locally
             for validator, instances in self.remote_instances.items():
                 if (vali := validator_by_hotkey(validator)) is None:
                     continue
                 for instance_id, data in instances.items():
-                    if instance_id not in all_instances:
+                    config_id = data.get("config_id", None)
+                    if instance_id not in all_instances and (
+                        not config_id or config_id not in all_configs
+                    ):
                         chute_id = data["chute_id"]
                         logger.warning(
-                            f"Found validator {chute_id=} {instance_id=} not deployed locally!"
+                            f"Found validator {chute_id=} {instance_id=} {config_id=} not deployed locally!"
                         )
                         await self.purge_validator_instance(vali, chute_id, instance_id)
 
-            # Purge k8s deployments that aren't tracked anymore.
+            # Purge k8s deployments that aren't tracked anymore
             for deployment_id in k8s_chute_ids - all_deployments:
                 logger.warning(
                     f"Removing kubernetes deployment that is no longer tracked: {deployment_id}"
@@ -1704,7 +1765,8 @@ class Gepetto:
             # GPUs that no longer exist in validator inventory.
             all_gpus = []
             for nodes in self.remote_nodes.values():
-                all_gpus += list(nodes)
+                all_gpus.extend(nodes)
+
             local_gpu_ids = set()
             async for row in (await session.stream(select(GPU))).unique():
                 gpu = row[0]
@@ -1731,21 +1793,22 @@ class Gepetto:
             #            if (validator := validator_by_hotkey(validator_hotkey)) is not None:
             #                await self.remove_gpu_from_validator(validator, gpu_id)
 
-            # Chutes that were removed/outdated.
+            # Process chutes
             async for row in await session.stream(select(Chute)):
                 chute = row[0]
                 identifier = f"{chute.validator}:{chute.chute_id}:{chute.version}"
                 all_chutes.add(identifier)
+
+                if identifier in chutes_to_remove:
+                    continue
+
                 remote = (self.remote_chutes.get(chute.validator) or {}).get(chute.chute_id)
-                if (
-                    not remote
-                    or remote["version"] != chute.version
-                    and identifier not in chutes_to_remove
-                ):
+                if not remote or remote["version"] != chute.version:
                     update = updating.get(chute.validator, {}).get(chute.chute_id)
                     if update:
                         logger.warning(f"Skipping reconciliation for chute with rolling {update=}")
                         continue
+
                     logger.warning(
                         f"Chute: {chute.chute_id} version={chute.version} on validator {chute.validator} not found: {remote=}"
                     )
@@ -1762,10 +1825,11 @@ class Gepetto:
                     )
                     chutes_to_remove.add(identifier)
 
-            # New chutes.
+            # Find new chutes
             for validator, chutes in self.remote_chutes.items():
                 for chute_id, config in chutes.items():
-                    if f"{validator}:{chute_id}:{config['version']}" not in all_chutes:
+                    identifier = f"{validator}:{chute_id}:{config['version']}"
+                    if identifier not in all_chutes:
                         update = updating.get(validator, {}).get(chute_id)
                         if update:
                             logger.warning(
@@ -1785,10 +1849,11 @@ class Gepetto:
                             )
                         )
 
-            # Kubernetes nodes (aka servers).
+            # Check Kubernetes nodes
             nodes = await k8s.get_kubernetes_nodes()
             node_ids = {node["server_id"] for node in nodes}
             all_server_ids = set()
+
             servers = (await session.execute(select(Server))).unique().scalars()
             for server in servers:
                 if server.server_id not in node_ids:
@@ -1799,9 +1864,8 @@ class Gepetto:
                 all_server_ids.add(server.server_id)
 
             # XXX We won't do the opposite (remove k8s nodes that aren't tracked) because they could be in provisioning status.
-            for node_id in node_ids:
-                if node_id not in all_server_ids:
-                    logger.warning(f"Server/node {node_id} not tracked in inventory, ignoring...")
+            for node_id in node_ids - all_server_ids:
+                logger.warning(f"Server/node {node_id} not tracked in inventory, ignoring...")
 
             await asyncio.gather(*tasks)
 

@@ -71,6 +71,7 @@ class SocketClient:
                 "image_created",
                 "image_deleted",
                 "image_updated",
+                "instance_created",
                 "instance_deleted",
                 "instance_verified",
                 "rolling_update",
