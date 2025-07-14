@@ -584,11 +584,15 @@ class Gepetto:
         except Exception as exc:
             logger.warning(f"Failed to release job: {exc=}")
 
-    async def run_job(self, chute: Chute, job_id: str, server: Server, validator: Validator):
+    async def run_job(
+        self, chute: Chute, job_id: str, server: Server, validator: Validator, disk_gb: int = 10
+    ):
         """
         Run a job on the specified server.
         """
-        logger.info(f"Attempting to deploy {job_id=} for {chute.chute_id=} on {server.server_id=}")
+        logger.info(
+            f"Attempting to deploy {job_id=} for {chute.chute_id=} on {server.server_id=} with {disk_gb=}"
+        )
         deployment = None
         try:
             launch_token = await self.get_launch_token(chute, job_id=job_id)
@@ -603,6 +607,7 @@ class Gepetto:
                 config_id=launch_token["config_id"] if launch_token else None,
                 job_id=job_id,
                 extra_labels={"chutes/job": "true"},
+                disk_gb=disk_gb,
             )
             logger.success(
                 f"Successfully deployed {job_id=} {chute.chute_id=} on {server.server_id=}: {deployment.deployment_id=}"
@@ -698,9 +703,10 @@ class Gepetto:
         gpu_count = event_data["gpu_count"]
         compute_multiplier = event_data["compute_multiplier"]
         validator_hotkey = event_data["validator"]
+        disk_gb = event_data["disk_gb"]
 
         logger.info(
-            f"Received job_created event for {chute_id=} {job_id=} with {gpu_count=} and {compute_multiplier=}"
+            f"Received job_created event for {chute_id=} {job_id=} with {gpu_count=} and {compute_multiplier=} and {disk_gb=}"
         )
         if settings.miner_ss58 in event_data.get("excluded", []):
             logger.warning("Miner hotkey excluded from job!")
@@ -714,9 +720,9 @@ class Gepetto:
         if not chute:
             logger.warning(f"Failed to load chute: {chute_id}")
             return
-        server = await self.optimal_scale_up_server(chute)
+        server = await self.optimal_scale_up_server(chute, disk_gb=disk_gb)
         if server:
-            await self.run_job(chute, job_id, server, validator)
+            await self.run_job(chute, job_id, server, validator, disk_gb)
             return
 
         # XXX This is where you as a miner definitely want to customize the strategy!
@@ -728,7 +734,7 @@ class Gepetto:
             logger.info(
                 f"Attempting a pre-empting deploy of {job_id=} {chute_id=} with {supported_gpus=} and {gpu_count=}"
             )
-            await self.preempting_deploy(chute, job_id=job_id)
+            await self.preempting_deploy(chute, job_id=job_id, disk_gb=disk_gb)
 
     async def job_deleted(self, event_data: Dict[str, Any]):
         """
@@ -1153,7 +1159,7 @@ class Gepetto:
             return (await session.execute(query)).unique().scalar_one_or_none()
 
     @staticmethod
-    async def optimal_scale_up_server(chute: Chute) -> Optional[Server]:
+    async def optimal_scale_up_server(chute: Chute, disk_gb: int = 10) -> Optional[Server]:
         """
         Find the optimal server for scaling up a chute deployment.
         """
@@ -1210,14 +1216,15 @@ class Gepetto:
                 Server.locked.is_(False),
             )
             .order_by(Server.hourly_cost.asc(), text("free_gpus ASC"))
-            .limit(1)
         )
         async with get_session() as session:
-            result = await session.execute(query)
-            row = result.first()
-            return row.Server if row else None
+            servers = (await session.execute(query)).unique().scalars().all()
+            for server in servers:
+                if await k8s.check_node_has_disk_available(server.name, disk_gb):
+                    return server
+        return None
 
-    async def preempting_deploy(self, chute: Chute, job_id: str = None):
+    async def preempting_deploy(self, chute: Chute, job_id: str = None, disk_gb: int = 10):
         """
         Force deploy a chute by preempting other deployments (assuming a server exists that can be used).
         """
@@ -1302,6 +1309,13 @@ class Gepetto:
         if not servers:
             logger.warning(f"No servers in inventory are capable of running {chute.chute_id=}")
             return
+
+        # Fetch disk space.
+        servers = [
+            server
+            for server in servers
+            if await k8s.check_node_has_disk_available(server.name, disk_gb)
+        ]
 
         # Iterate through servers to see if any *could* handle preemption.
         chute_counts = {}
@@ -1426,6 +1440,7 @@ class Gepetto:
                 service,
                 token=launch_token["token"] if launch_token else None,
                 config_id=launch_token["config_id"] if launch_token else None,
+                disk_gb=disk_gb,
             )
             logger.success(
                 f"Successfully deployed {chute.chute_id=} {job_id=} via preemption on {server.server_id=}: {deployment.deployment_id=}"

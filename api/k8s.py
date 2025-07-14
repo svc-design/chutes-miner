@@ -4,7 +4,9 @@ Helper for kubernetes interactions (now using jobs instead of deployments).
 
 import math
 import uuid
+import asyncio
 import traceback
+from datetime import datetime, timedelta
 from loguru import logger
 from typing import List, Dict, Any
 from kubernetes import watch
@@ -41,6 +43,144 @@ from api.deployment.schemas import Deployment
 from api.config import k8s_core_client, k8s_batch_client
 
 
+# Cache disk stats.
+_disk_info_cache: dict[str, tuple[dict[str, float], datetime]] = {}
+_disk_info_locks: dict[str, asyncio.Lock] = {}
+
+
+def invalidate_node_disk_cache(node_name: str):
+    """
+    Invalidate the disk cache for a specific node.
+    """
+    if node_name in _disk_info_cache:
+        logger.info(f"Invalidating disk cache for node {node_name}")
+        del _disk_info_cache[node_name]
+
+
+async def get_node_disk_info(node_name: str) -> Dict[str, float]:
+    """
+    Get disk space information for a specific node with caching.
+    Returns dict with total_gb, available_gb, used_gb
+    """
+    # Check cache first
+    if node_name in _disk_info_cache:
+        disk_info, expiry_time = _disk_info_cache[node_name]
+        if datetime.now() < expiry_time:
+            return disk_info
+
+    # Get or create a lock for this node
+    if node_name not in _disk_info_locks:
+        _disk_info_locks[node_name] = asyncio.Lock()
+
+    async with _disk_info_locks[node_name]:
+        if node_name in _disk_info_cache:
+            disk_info, expiry_time = _disk_info_cache[node_name]
+            if datetime.now() < expiry_time:
+                return disk_info
+
+        logger.info(f"Fetching fresh disk info for node {node_name}")
+        try:
+            pods = k8s_core_client().list_pod_for_all_namespaces(
+                field_selector=f"spec.nodeName={node_name}"
+            )
+            used_disk_gb = 0
+            for pod in pods.items:
+                if pod.status.phase not in ["Running", "Pending"]:
+                    continue
+
+                # Check containers for ephemeral-storage requests
+                if pod.spec.containers:
+                    for container in pod.spec.containers:
+                        if container.resources and container.resources.requests:
+                            ephemeral_storage = container.resources.requests.get(
+                                "ephemeral-storage", "0"
+                            )
+                            if isinstance(ephemeral_storage, str):
+                                if ephemeral_storage.endswith("Gi"):
+                                    used_disk_gb += float(ephemeral_storage.replace("Gi", ""))
+                                elif ephemeral_storage.endswith("G"):
+                                    used_disk_gb += float(ephemeral_storage.replace("G", ""))
+                                elif ephemeral_storage.endswith("Mi"):
+                                    used_disk_gb += (
+                                        float(ephemeral_storage.replace("Mi", "")) / 1024
+                                    )
+                                elif ephemeral_storage.endswith("M"):
+                                    used_disk_gb += float(ephemeral_storage.replace("M", "")) / 1024
+                                elif ephemeral_storage.endswith("Ki"):
+                                    used_disk_gb += (
+                                        float(ephemeral_storage.replace("Ki", "")) / 1024 / 1024
+                                    )
+
+                # Also check init containers
+                if pod.spec.init_containers:
+                    for container in pod.spec.init_containers:
+                        if container.resources and container.resources.requests:
+                            ephemeral_storage = container.resources.requests.get(
+                                "ephemeral-storage", "0"
+                            )
+                            if isinstance(ephemeral_storage, str):
+                                if ephemeral_storage.endswith("Gi"):
+                                    used_disk_gb += float(ephemeral_storage.replace("Gi", ""))
+                                elif ephemeral_storage.endswith("G"):
+                                    used_disk_gb += float(ephemeral_storage.replace("G", ""))
+                                elif ephemeral_storage.endswith("Mi"):
+                                    used_disk_gb += (
+                                        float(ephemeral_storage.replace("Mi", "")) / 1024
+                                    )
+                                elif ephemeral_storage.endswith("M"):
+                                    used_disk_gb += float(ephemeral_storage.replace("M", "")) / 1024
+                                elif ephemeral_storage.endswith("Ki"):
+                                    used_disk_gb += (
+                                        float(ephemeral_storage.replace("Ki", "")) / 1024 / 1024
+                                    )
+
+            # Get node capacity
+            node = k8s_core_client().read_node(name=node_name)
+
+            # Try to get ephemeral storage capacity
+            ephemeral_storage = node.status.capacity.get("ephemeral-storage", "0")
+            if ephemeral_storage.endswith("Ki"):
+                total_disk_gb = int(ephemeral_storage.replace("Ki", "")) / 1024 / 1024
+            elif ephemeral_storage.endswith("Mi"):
+                total_disk_gb = int(ephemeral_storage.replace("Mi", "")) / 1024
+            elif ephemeral_storage.endswith("Gi"):
+                total_disk_gb = int(ephemeral_storage.replace("Gi", ""))
+            else:
+                logger.warning(
+                    "Could not determine node ephemeral storage capacity, using default=100"
+                )
+                total_disk_gb = 100
+
+            # Reserve some disk space for system operations
+            system_reserved_gb = 20
+            available_disk_gb = total_disk_gb - used_disk_gb - system_reserved_gb
+            disk_info = {
+                "total_gb": total_disk_gb,
+                "available_gb": max(0, available_disk_gb),
+                "used_gb": used_disk_gb,
+            }
+
+            # Cache the result with 5 minute expiry
+            expiry_time = datetime.now() + timedelta(minutes=5)
+            _disk_info_cache[node_name] = (disk_info, expiry_time)
+            logger.info(
+                f"Node {node_name} disk info: total={total_disk_gb}GB, used={used_disk_gb}GB, available={available_disk_gb}GB"
+            )
+            return disk_info
+
+        except Exception as e:
+            logger.warning(f"Failed to get disk info for node {node_name}: {e}")
+            error_result = {
+                "total_gb": 0,
+                "available_gb": 0,
+                "used_gb": 0,
+            }
+            expiry_time = datetime.now() + timedelta(minutes=1)
+            _disk_info_cache[node_name] = (error_result, expiry_time)
+
+            return error_result
+
+
 async def get_kubernetes_nodes() -> List[Dict]:
     """
     Get all Kubernetes nodes via k8s client, optionally filtering by GPU nodes.
@@ -73,6 +213,10 @@ async def get_kubernetes_nodes() -> List[Dict]:
                 if total_memory_gb <= gpu_count
                 else min(gpu_mem_gb, math.floor(total_memory_gb * 0.8 / gpu_count))
             )
+
+            # Get disk space information
+            disk_info = await get_node_disk_info(node.metadata.name)
+
             node_info = {
                 "name": node.metadata.name,
                 "validator": node.metadata.labels.get("chutes/validator"),
@@ -81,12 +225,23 @@ async def get_kubernetes_nodes() -> List[Dict]:
                 "ip_address": node.metadata.labels.get("chutes/external-ip"),
                 "cpu_per_gpu": cpus_per_gpu,
                 "memory_gb_per_gpu": memory_gb_per_gpu,
+                "disk_total_gb": disk_info.get("total_gb", 0),
+                "disk_available_gb": disk_info.get("available_gb", 0),
+                "disk_used_gb": disk_info.get("used_gb", 0),
             }
             nodes.append(node_info)
     except Exception as e:
         logger.error(f"Failed to get Kubernetes nodes: {e}")
         raise
     return nodes
+
+
+async def check_node_has_disk_available(node_name: str, required_disk_gb: int) -> bool:
+    """
+    Check if a node has sufficient disk space available for a deployment.
+    """
+    disk_info = await get_node_disk_info(node_name)
+    return disk_info.get("available_gb", 0) >= required_disk_gb
 
 
 def is_job_ready(job):
@@ -262,6 +417,15 @@ async def undeploy(deployment_id: str):
     """
     Delete a job, and associated service.
     """
+    node_name = None
+    try:
+        job = k8s_batch_client().read_namespaced_job(
+            name=f"chute-{deployment_id}",
+            namespace=settings.namespace,
+        )
+        node_name = job.spec.template.spec.node_name
+    except Exception:
+        pass
     try:
         k8s_batch_client().delete_namespaced_job(
             name=f"chute-{deployment_id}",
@@ -272,6 +436,8 @@ async def undeploy(deployment_id: str):
         logger.warning(f"Error deleting job from k8s: {exc}")
     await cleanup_service(deployment_id)
     await wait_for_deletion(f"chutes/deployment-id={deployment_id}", timeout_seconds=15)
+    if node_name:
+        invalidate_node_disk_cache(node_name)
 
 
 async def get_pods_by_label(label_selector: str):
@@ -408,6 +574,12 @@ async def _deploy_chute(
                 f"Server {server.server_id} name={server.name} cannot allocate {chute.gpu_count} GPUs, already using {gpus_allocated} of {len(server.gpus)}"
             )
 
+        # Check disk space availability
+        if not await check_node_has_disk_available(server.name, disk_gb):
+            raise DeploymentFailure(
+                f"Server {server.server_id} name={server.name} does not have {disk_gb}GB disk space available"
+            )
+
         # Immediately track this deployment (before actually creating it) to avoid allocation contention.
         gpus = list([gpu for gpu in server.gpus if gpu.gpu_id in available_gpus])[: chute.gpu_count]
         deployment = Deployment(
@@ -526,7 +698,7 @@ async def _deploy_chute(
                         ),
                         V1Volume(
                             name="tmp",
-                            empty_dir=V1EmptyDirVolumeSource(size_limit="10Gi"),
+                            empty_dir=V1EmptyDirVolumeSource(size_limit=f"{disk_gb}Gi"),
                         ),
                         V1Volume(
                             name="shm",
@@ -639,11 +811,13 @@ async def _deploy_chute(
                                     "cpu": cpu,
                                     "memory": ram,
                                     "nvidia.com/gpu": str(chute.gpu_count),
+                                    "ephemeral-storage": f"{disk_gb}Gi",
                                 },
                                 limits={
                                     "cpu": cpu,
                                     "memory": ram,
                                     "nvidia.com/gpu": str(chute.gpu_count),
+                                    "ephemeral-storage": f"{disk_gb}Gi",
                                 },
                             ),
                             volume_mounts=[
@@ -710,6 +884,7 @@ async def _deploy_chute(
             await session.commit()
             await session.refresh(deployment)
 
+        invalidate_node_disk_cache(server.name)
         return deployment, created_job
     except ApiException as exc:
         try:
