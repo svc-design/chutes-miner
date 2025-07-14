@@ -372,6 +372,7 @@ async def _deploy_chute(
     token: str = None,
     job_id: str = None,
     config_id: str = None,
+    disk_gb: int = 10,
     extra_labels: dict[str, str] = {},
 ):
     """
@@ -745,6 +746,7 @@ async def deploy_chute(
     token: str = None,
     job_id: str = None,
     config_id: str = None,
+    disk_gb: int = 10,
     extra_labels: dict[str, str] = {},
 ):
     """
@@ -760,6 +762,7 @@ async def deploy_chute(
             extra_labels=extra_labels,
             job_id=job_id,
             config_id=config_id,
+            disk_gb=disk_gb,
         )
     except Exception as exc:
         logger.warning(
