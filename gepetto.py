@@ -398,8 +398,7 @@ class Gepetto:
                         logger.info(
                             f"No metrics for {chute_id=} {chute_name}, scaling would be unproductive..."
                         )
-                        logger.info(metrics)
-                        #continue
+                        continue
 
                     # If we have all deployments already (no other miner has this) then no need to scale.
                     total_count = metrics.get("instance_count", 0)
@@ -907,8 +906,14 @@ class Gepetto:
         if chute_ids:
             async with get_session() as session:
                 await session.execute(
-                    text("UPDATE chutes SET image = :image WHERE chute_id = ANY(:chute_ids)"),
-                    {"image": event_data.get("image"), "chute_ids": chute_ids},
+                    text(
+                        "UPDATE chutes SET chutes_version = :chutes_version, image = :image WHERE chute_id = ANY(:chute_ids)"
+                    ),
+                    {
+                        "image": event_data.get("image"),
+                        "chute_ids": chute_ids,
+                        "chutes_version": event_data["chutes_version"],
+                    },
                 )
                 await session.commit()
 
@@ -1593,6 +1598,37 @@ class Gepetto:
                         "instance_id": instance_id,
                         "validator": validator,
                     }
+
+        # Update chutes image field based on remote_images
+        async with get_session() as session:
+            image_updates = {}
+            for validator, images in self.remote_images.items():
+                for image_id, image_data in images.items():
+                    image_str = (
+                        f"{image_data['user']['username']}/{image_data['name']}:{image_data['tag']}"
+                    )
+                    if image_data.get("patch_version") and image_data["patch_version"] != "initial":
+                        image_str += f"-{image_data['patch_version']}"
+                    image_updates[image_id] = {
+                        "image": image_str,
+                        "chutes_version": image_data["chutes_version"],
+                    }
+            async for row in (await session.stream(select(Chute))).unique():
+                chute = row[0]
+                if chute.image_id and chute.image_id in image_updates:
+                    update_data = image_updates[chute.image_id]
+                    if chute.image != update_data["image"]:
+                        logger.info(
+                            f"Updating chute {chute.chute_id} image from '{chute.image}' to '{update_data['image']}'"
+                        )
+                        chute.image = update_data["image"]
+                    if update_data["chutes_version"] != chute.chutes_version:
+                        logger.info(
+                            f"Updating chute {chute.chute_id} chutes_version from '{chute.chutes_version}' to '{update_data['chutes_version']}'"
+                        )
+                        chute.chutes_version = update_data["chutes_version"]
+
+                await session.commit()
 
         async with get_session() as session:
             # Clean up based on deployments/instances.
