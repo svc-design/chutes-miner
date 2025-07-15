@@ -1,63 +1,8 @@
-apiVersion: {{ if (.Values.calico | default true) }}projectcalico.org/v3{{ else }}networking.k8s.io/v1{{ end }}
+apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: chutes-job-network-policy
 spec:
-{{- if (.Values.calico | default true) }}
-  selector: 'chutes/chute == "true" && chutes/job == "true"'
-  types:
-    - Ingress
-    - Egress
-  ingress:
-    - action: Allow
-  egress:
-    # DNS resolution
-    - action: Allow
-      protocol: UDP
-      destination:
-        ports:
-          - 53
-    - action: Allow
-      protocol: TCP
-      destination:
-        ports:
-          - 53
-    
-    # TCP egress to public ranges
-    - action: Allow
-      protocol: TCP
-      destination:
-        nets:
-          - 0.0.0.0/0
-        notNets:
-          - 10.0.0.0/8
-          - 172.16.0.0/12
-          - 192.168.0.0/16
-          - 169.254.0.0/16
-          - 100.64.0.0/10
-    
-    # UDP egress to public ranges
-    - action: Allow
-      protocol: UDP
-      destination:
-        nets:
-          - 0.0.0.0/0
-        notNets:
-          - 10.0.0.0/8
-          - 172.16.0.0/12
-          - 192.168.0.0/16
-          - 169.254.0.0/16
-          - 100.64.0.0/10
-    
-    # Kubernetes API server access (default namespace, any TCP port)
-    - action: Allow
-      protocol: TCP
-      destination:
-        namespaceSelector: default
-    
-    # Deny all other traffic with immediate rejection
-    - action: Deny
-{{- else }}
   podSelector:
     matchLabels:
       chutes/chute: "true"
@@ -93,4 +38,3 @@ spec:
               name: default
       ports:
         - protocol: TCP
-{{- end }}

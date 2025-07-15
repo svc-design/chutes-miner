@@ -74,6 +74,7 @@ class SocketClient:
                 "instance_created",
                 "instance_deleted",
                 "instance_verified",
+                "instance_activated",
                 "rolling_update",
                 "job_created",
                 "job_deleted",

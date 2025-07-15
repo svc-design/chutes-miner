@@ -52,6 +52,7 @@ class Gepetto:
         self.pubsub.on_event("instance_created")(self.instance_created)
         self.pubsub.on_event("instance_verified")(self.instance_verified)
         self.pubsub.on_event("instance_deleted")(self.instance_deleted)
+        self.pubsub.on_event("instance_activated")(self.instance_activated)
         self.pubsub.on_event("rolling_update")(self.rolling_update)
         self.pubsub.on_event("chute_deleted")(self.chute_deleted)
         self.pubsub.on_event("chute_created")(self.chute_created)
@@ -397,10 +398,11 @@ class Gepetto:
                         logger.info(
                             f"No metrics for {chute_id=} {chute_name}, scaling would be unproductive..."
                         )
-                        continue
+                        logger.info(metrics)
+                        #continue
 
                     # If we have all deployments already (no other miner has this) then no need to scale.
-                    total_count = metrics["instance_count"]
+                    total_count = metrics.get("instance_count", 0)
                     if local_count and local_count >= total_count:
                         logger.info(
                             f"We have all deployments for {chute_id=} {chute_name}, scaling would be unproductive..."
@@ -409,9 +411,9 @@ class Gepetto:
 
                     # Calculate potential gain from a new deployment.
                     potential_gain = (
-                        metrics["total_usage_usd"]
+                        metrics.get("total_usage_usd", 0)
                         if not total_count
-                        else metrics["total_usage_usd"] / (total_count + 1)
+                        else metrics.get("total_usage_usd", 0) / (total_count + 1)
                     )
 
                     # See if we have a server that could even handle it.
@@ -824,6 +826,18 @@ class Gepetto:
                 await session.delete(gpu)
                 await session.commit()
         logger.info(f"Finished processing gpu_deleted event for {gpu_id=}")
+
+    async def instance_activated(self, event_data: dict[str, Any]):
+        """
+        An instance has been marked as active (new chutes lib flow).
+        """
+        config_id = event_data["config_id"]
+        logger.info(f"Received instance_activated event for {config_id=}")
+        async with get_session() as session:
+            await session.execute(
+                text("UPDATE deployments SET active = true WHERE config_id = :config_id"),
+                {"config_id": config_id},
+            )
 
     async def instance_deleted(self, event_data: Dict[str, Any]):
         """
@@ -1568,10 +1582,51 @@ class Gepetto:
         except Exception as exc:
             logger.error(f"Failed to get pods by config-id label: {exc}")
 
+        # Build map of config_id -> instance from remote inventory.
+        remote_by_config_id = {}
+        for validator, instances in self.remote_instances.items():
+            for instance_id, data in instances.items():
+                config_id = data.get("config_id")
+                if config_id:
+                    remote_by_config_id[config_id] = {
+                        **data,
+                        "instance_id": instance_id,
+                        "validator": validator,
+                    }
+
         async with get_session() as session:
             # Clean up based on deployments/instances.
             async for row in (await session.stream(select(Deployment))).unique():
                 deployment = row[0]
+
+                # Make sure the instances created with launch configs have the instance ID tracked.
+                if deployment.config_id and not deployment.instance_id:
+                    remote_match = remote_by_config_id.get(deployment.config_id)
+                    if remote_match and remote_match.get("validator") == deployment.validator:
+                        deployment.instance_id = remote_match["instance_id"]
+                        logger.info(
+                            f"Updated deployment {deployment.deployment_id} with instance_id={deployment.instance_id} "
+                            f"based on matching config_id={deployment.config_id}"
+                        )
+
+                # Reconcile the verified/active state for instances.
+                if deployment.instance_id:
+                    remote_instance = (self.remote_instances.get(deployment.validator) or {}).get(
+                        deployment.instance_id
+                    )
+                    logger.info(f"CHECKING REMOTE: {remote_instance=}")
+                    if remote_instance:
+                        if remote_instance.get("inst_verified_at") and not deployment.verified_at:
+                            deployment.verified_at = func.now()
+                            logger.info(
+                                f"Marking deployment {deployment.deployment_id} as verified based on remote status"
+                            )
+                        remote_active = remote_instance.get("active", True)
+                        if deployment.active != remote_active:
+                            deployment.active = remote_active
+                            logger.info(
+                                f"Updating deployment {deployment.deployment_id} active status to {deployment.active}"
+                            )
 
                 # Early check for orphaned deployments with config_id
                 if deployment.config_id and deployment.config_id not in k8s_config_ids:
