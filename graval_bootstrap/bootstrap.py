@@ -112,6 +112,7 @@ def main():
         Generate a proof for the incoming challenge, along with decrypting the payload.
         """
         request_body = await request.body()
+        print(f"Received proof request: {request_body=}")
         sha2 = hashlib.sha256(request_body).hexdigest()
         verify_request(request, (args.validator_whitelist or "").split(","), extra_key=sha2)
         async with gpu_lock:
@@ -128,18 +129,28 @@ def main():
 
             # Decrypt all ciphertexts, if provided.
             for cipher in challenge.ciphertext:
+                print(
+                    f"Decrypting {cipher.data=} for {cipher.device_index=} from seed {challenge.seed}"
+                )
                 bytes_ = base64.b64decode(cipher.data)
                 iv = bytes_[:16]
                 ciphertext = bytes_[16:]
-                return_value["plaintext"].append(
-                    miner.decrypt(
-                        challenge.seed,
-                        ciphertext,
-                        iv,
-                        len(ciphertext),
-                        cipher.device_index,
-                    ),
-                )
+                try:
+                    return_value["plaintext"].append(
+                        miner.decrypt(
+                            challenge.seed,
+                            ciphertext,
+                            iv,
+                            len(ciphertext),
+                            cipher.device_index,
+                        ),
+                    )
+                except Exception as exc:
+                    print(
+                        f"Failed to decrypt {cipher.device_index=} from seed {challenge.seed}: {exc=}"
+                    )
+                    raise
+
             return return_value
 
     @app.get("/info", response_class=PlainTextResponse)

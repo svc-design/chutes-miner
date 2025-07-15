@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     namespace: str = os.getenv("CHUTES_NAMESPACE", "chutes")
     graval_bootstrap_image: str = os.getenv(
         "GRAVAL_BOOTSTRAP_IMAGE",
-        "parachutes/graval-bootstrap:0.1.2-opencl",
+        "parachutes/graval-bootstrap-opencl:0.2.4-dev2",
     )
     graval_bootstrap_timeout: int = int(os.getenv("GRAVAL_BOOTSTRAP_TIMEOUT", "900"))
     miner_ss58: str = os.environ["MINER_SS58"]

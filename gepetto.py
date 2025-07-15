@@ -90,7 +90,10 @@ class Gepetto:
             headers, _ = sign_request(purpose="miner")
             updated_items = {}
             explicit_null = False
-            async with session.get(url, headers=headers) as resp:
+            params = {}
+            if "instances" in url:
+                params["explicit_null"] = "True"
+            async with session.get(url, headers=headers, params=params) as resp:
                 async for content_enc in resp.content:
                     content = content_enc.decode()
                     if content.startswith("data: {"):
