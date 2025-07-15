@@ -582,6 +582,10 @@ async def _deploy_chute(
 
         # Immediately track this deployment (before actually creating it) to avoid allocation contention.
         gpus = list([gpu for gpu in server.gpus if gpu.gpu_id in available_gpus])[: chute.gpu_count]
+        gpu_uuids = [f"GPU-{str(uuid.UUID(gpu.gpu_id))}" for gpu in gpus]
+        logger.info(
+            f"Assigning {len(gpu_uuids)} GPUs [{gpu_uuids}] to {chute_id=} on {server.name=}"
+        )
         deployment = Deployment(
             deployment_id=deployment_id,
             server_id=server.server_id,
@@ -759,6 +763,10 @@ async def _deploy_chute(
                             image_pull_policy="Always",
                             env=[
                                 V1EnvVar(
+                                    name="NVIDIA_VISIBLE_DEVICES",
+                                    value=",".join(gpu_uuids),
+                                ),
+                                V1EnvVar(
                                     name="CHUTES_PORT_PRIMARY",
                                     value=str(service.spec.ports[0].node_port),
                                 ),
@@ -810,13 +818,11 @@ async def _deploy_chute(
                                 requests={
                                     "cpu": cpu,
                                     "memory": ram,
-                                    "nvidia.com/gpu": str(chute.gpu_count),
                                     "ephemeral-storage": f"{disk_gb}Gi",
                                 },
                                 limits={
                                     "cpu": cpu,
                                     "memory": ram,
-                                    "nvidia.com/gpu": str(chute.gpu_count),
                                     "ephemeral-storage": f"{disk_gb}Gi",
                                 },
                             ),
