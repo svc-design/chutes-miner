@@ -40,7 +40,7 @@ from api.database import get_session
 from api.server.schemas import Server
 from api.chute.schemas import Chute
 from api.deployment.schemas import Deployment
-from api.config import k8s_core_client, k8s_batch_client
+from api.config import k8s_core_client, k8s_batch_client, k8s_app_client
 
 
 # Cache disk stats.
@@ -358,6 +358,36 @@ async def get_deployed_chutes() -> List[Dict]:
         jobs.append(_extract_job_info(job))
         logger.info(f"Found chute job: {job.metadata.name} in namespace {job.metadata.namespace}")
     return jobs
+
+
+async def get_deployed_chutes_legacy() -> List[Dict]:
+    """
+    Get all legacy chutes deployments (V1Deployment) from kubernetes.
+    This is for backwards compatibility with the old deployment-based system.
+    """
+    deployments = []
+    label_selector = "chutes/chute=true"
+    try:
+        deployment_list = k8s_app_client().list_namespaced_deployment(
+            namespace=settings.namespace, label_selector=label_selector
+        )
+        for deployment in deployment_list.items:
+            deploy_info = {
+                "deployment_id": deployment.metadata.labels.get("chutes/deployment-id"),
+                "name": deployment.metadata.name,
+                "namespace": deployment.metadata.namespace,
+                "labels": deployment.metadata.labels,
+                "chute_id": deployment.metadata.labels.get("chutes/chute-id"),
+                "version": deployment.metadata.labels.get("chutes/version"),
+                "is_legacy": True,
+            }
+            deployments.append(deploy_info)
+            logger.info(
+                f"Found legacy chute deployment: {deployment.metadata.name} in namespace {deployment.metadata.namespace}"
+            )
+    except Exception as e:
+        logger.error(f"Failed to get legacy deployments: {e}")
+    return deployments
 
 
 async def delete_code(chute_id: str, version: str):

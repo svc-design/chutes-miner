@@ -1584,8 +1584,21 @@ class Gepetto:
         all_deployments = set()
         all_instances = set()
         all_configs = set()
+
+        # Get both new job-based and old deployment-based chutes
         k8s_chutes = await k8s.get_deployed_chutes()
+        k8s_legacy_deployments = await k8s.get_deployed_chutes_legacy()
+
+        # Combine both into a single set of deployment IDs
         k8s_chute_ids = {c["deployment_id"] for c in k8s_chutes}
+        k8s_legacy_ids = {d["deployment_id"] for d in k8s_legacy_deployments}
+        all_k8s_ids = k8s_chute_ids | k8s_legacy_ids
+
+        # Log legacy deployments for visibility
+        if k8s_legacy_ids:
+            logger.info(
+                f"Found {len(k8s_legacy_ids)} legacy deployment-based chutes: {k8s_legacy_ids}"
+            )
 
         # Get all pods with config_id labels for orphan detection
         k8s_config_ids = set()
@@ -1782,8 +1795,18 @@ class Gepetto:
                         )
                     # Don't continue here - we still need to check k8s state and cleanup
 
-                # Check if deployment exists in k8s
-                deployment_in_k8s = deployment.deployment_id in k8s_chute_ids
+                # Check if deployment exists in k8s (either as job or legacy deployment)
+                deployment_in_k8s = deployment.deployment_id in all_k8s_ids
+
+                # Special handling for legacy deployments
+                if deployment.deployment_id in k8s_legacy_ids:
+                    logger.info(
+                        f"Found legacy deployment {deployment.deployment_id}, preserving it"
+                    )
+                    all_deployments.add(deployment.deployment_id)
+                    if deployment.instance_id:
+                        all_instances.add(deployment.instance_id)
+                    continue
 
                 # Delete deployments that never made it past stub stage or disappeared from k8s
                 if not deployment.stub and not deployment_in_k8s:
@@ -1835,16 +1858,6 @@ class Gepetto:
                         await self.undeploy(deployment.deployment_id)
                         destroyed = True
 
-                        # XXX Ban??? Probably not, but could do.
-                        # if (
-                        #     chute := await self.load_chute(
-                        #         deployment.chute_id, deployment.version, deployment.validator
-                        #     )
-                        # ) is not None:
-                        #     chute.ban_reason = (
-                        #         "Chute job failed and never ran successfully."
-                        #     )
-
                     # Check for terminated pods (for Jobs that don't update status properly)
                     if not destroyed:
                         for pod in kd.get("pods", []):
@@ -1862,16 +1875,6 @@ class Gepetto:
                                     )
                                 await self.undeploy(deployment.deployment_id)
                                 destroyed = True
-
-                                # XXX Ban??? Probably not, but could do.
-                                # if (
-                                #     chute := await self.load_chute(
-                                #         deployment.chute_id, deployment.version, deployment.validator
-                                #     )
-                                # ) is not None:
-                                #     chute.ban_reason = (
-                                #         f"Chute terminated with exit code {exit_code}."
-                                #     )
                                 break
 
                     if destroyed:
@@ -1900,7 +1903,11 @@ class Gepetto:
                         await self.purge_validator_instance(vali, chute_id, instance_id)
 
             # Purge k8s deployments that aren't tracked anymore
-            for deployment_id in k8s_chute_ids - all_deployments:
+            # BUT exclude legacy deployments from deletion
+            for deployment_id in all_k8s_ids - all_deployments:
+                if deployment_id in k8s_legacy_ids:
+                    logger.info(f"Preserving legacy kubernetes deployment: {deployment_id}")
+                    continue
                 logger.warning(
                     f"Removing kubernetes deployment that is no longer tracked: {deployment_id}"
                 )
