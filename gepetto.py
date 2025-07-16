@@ -837,7 +837,9 @@ class Gepetto:
         logger.info(f"Received instance_activated event for {config_id=}")
         async with get_session() as session:
             await session.execute(
-                text("UPDATE deployments SET active = true WHERE config_id = :config_id"),
+                text(
+                    "UPDATE deployments SET active = true, stub = false WHERE config_id = :config_id"
+                ),
                 {"config_id": config_id},
             )
 
@@ -1671,6 +1673,7 @@ class Gepetto:
                         remote_active = remote_instance.get("active", True)
                         if deployment.active != remote_active:
                             deployment.active = remote_active
+                            deployment.stub = False
                             logger.info(
                                 f"Updating deployment {deployment.deployment_id} active status to {deployment.active}"
                             )

@@ -431,7 +431,9 @@ async def _advertise_nodes(validator: Validator, gpus: List[GPU]):
             }
             for idx in range(len(gpus))
         ]
-        headers, payload_string = sign_request(payload={"nodes": device_infos})
+        headers, payload_string = sign_request(
+            payload={"nodes": device_infos, "server_id": gpus[0].server_id}
+        )
         async with session.post(
             f"{validator.api}/nodes/", data=payload_string, headers=headers
         ) as response:

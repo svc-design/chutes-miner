@@ -18,15 +18,10 @@ from fastapi import FastAPI, Request, status, HTTPException
 from fastapi.responses import PlainTextResponse
 
 
-class Ciphertext(BaseModel):
-    data: str
-    device_index: int
-
-
 class Challenge(BaseModel):
     seed: int = Field(..., ge=0)
     iterations: int = Field(1, ge=1, le=10)
-    ciphertext: Optional[list[Ciphertext]] = []
+    ciphertext: Optional[dict[str, str]] = {}
 
 
 def main():
@@ -47,12 +42,13 @@ def main():
     args = parser.parse_args()
 
     miner = Miner()
+    miner._uuids = [miner.get_device_info(i)["uuid"] for i in range(miner._device_count)]
     miner._init_seed = None
     miner._init_iter = None
     app = FastAPI(
         title="GraVal bootstrap",
         description="GPU info plz",
-        version="0.2.4",
+        version="0.2.5",
     )
     gpu_lock = asyncio.Lock()
 
@@ -124,30 +120,29 @@ def main():
                 ],
                 "seed": challenge.seed,
                 "proof": proofs,
-                "plaintext": [],
+                "plaintext": {},
             }
 
             # Decrypt all ciphertexts, if provided.
-            for cipher in challenge.ciphertext:
-                print(
-                    f"Decrypting {cipher.data=} for {cipher.device_index=} from seed {challenge.seed}"
-                )
-                bytes_ = base64.b64decode(cipher.data)
-                iv = bytes_[:16]
-                ciphertext = bytes_[16:]
+            for device_uuid, data in challenge.ciphertext.items():
                 try:
-                    return_value["plaintext"].append(
-                        miner.decrypt(
-                            challenge.seed,
-                            ciphertext,
-                            iv,
-                            len(ciphertext),
-                            cipher.device_index,
-                        ),
+                    device_index = miner._uuids.index(device_uuid)
+                    print(
+                        f"Decrypting {data=} for GPU {device_uuid} {device_index=} from seed {challenge.seed}"
+                    )
+                    bytes_ = base64.b64decode(data)
+                    iv = bytes_[:16]
+                    ciphertext = bytes_[16:]
+                    return_value["plaintext"][device_uuid] = miner.decrypt(
+                        challenge.seed,
+                        ciphertext,
+                        iv,
+                        len(ciphertext),
+                        device_index,
                     )
                 except Exception as exc:
                     print(
-                        f"Failed to decrypt {cipher.device_index=} from seed {challenge.seed}: {exc=}"
+                        f"Failed to decrypt on GPU {device_uuid} from seed {challenge.seed}: {exc=}"
                     )
                     raise
 
