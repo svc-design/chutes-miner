@@ -1043,6 +1043,7 @@ class Gepetto:
 
             # Remove the instance/deployment.
             server_id = None
+            server_gpu_type = None
             async with get_session() as session:
                 deployment = (
                     (
@@ -1058,10 +1059,12 @@ class Gepetto:
                 )
                 if deployment:
                     server_id = deployment.server.server_id
+                    server_gpu_type = deployment.server.gpus[0].model_short_ref
                     await self.undeploy(deployment.deployment_id)
                 deployment = None
 
             # Make sure the local chute is updated.
+            chute_dict = None
             if (chute := await self.load_chute(chute_id, version, validator_hotkey)) is None:
                 chute_dict = None
                 try:
@@ -1116,7 +1119,7 @@ class Gepetto:
                     await k8s.create_code_config_map(chute)
 
             # Deploy the new version.
-            if server_id:
+            if server_id and chute_dict and server_gpu_type in chute_dict["supported_gpus"]:
                 logger.info(f"Attempting to deploy {chute.chute_id=} on {server_id=}")
                 deployment = None
                 try:
@@ -1663,7 +1666,6 @@ class Gepetto:
                     remote_instance = (self.remote_instances.get(deployment.validator) or {}).get(
                         deployment.instance_id
                     )
-                    logger.info(f"CHECKING REMOTE: {remote_instance=}")
                     if remote_instance:
                         if remote_instance.get("inst_verified_at") and not deployment.verified_at:
                             deployment.verified_at = func.now()

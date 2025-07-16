@@ -790,26 +790,6 @@ async def _deploy_chute(
                                     name="NCCL_SOCKET_IFNAME",
                                     value="^docker,lo",
                                 ),
-                                V1EnvVar(
-                                    name="NCCL_P2P_DISABLE",
-                                    value="1",
-                                ),
-                                V1EnvVar(
-                                    name="NCCL_IB_DISABLE",
-                                    value="1",
-                                ),
-                                V1EnvVar(
-                                    name="NCCL_SHM_DISABLE",
-                                    value="0",
-                                ),
-                                V1EnvVar(
-                                    name="NCCL_NET_GDR_LEVEL",
-                                    value="0",
-                                ),
-                                V1EnvVar(
-                                    name="CUDA_VISIBLE_DEVICES",
-                                    value=",".join([str(idx) for idx in range(chute.gpu_count)]),
-                                ),
                                 V1EnvVar(name="HF_HOME", value="/cache"),
                                 V1EnvVar(name="CIVITAI_HOME", value="/cache/civitai"),
                             ]
