@@ -725,6 +725,13 @@ async def _deploy_chute(
                             ),
                         ),
                         V1Volume(
+                            name="raw-cache",
+                            host_path=V1HostPathVolumeSource(
+                                path="/var/snap/cache",
+                                type="DirectoryOrCreate",
+                            ),
+                        ),
+                        V1Volume(
                             name="cache-cleanup",
                             config_map=V1ConfigMapVolumeSource(
                                 name="chutes-cache-cleaner",
@@ -774,7 +781,7 @@ async def _deploy_chute(
                                 ),
                             ],
                             volume_mounts=[
-                                V1VolumeMount(name="cache", mount_path="/cache"),
+                                V1VolumeMount(name="raw-cache", mount_path="/cache"),
                                 V1VolumeMount(
                                     name="cache-cleanup",
                                     mount_path="/scripts",
