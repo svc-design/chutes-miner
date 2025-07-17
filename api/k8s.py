@@ -2,6 +2,8 @@
 Helper for kubernetes interactions (now using jobs instead of deployments).
 """
 
+import re
+import semver
 import math
 import uuid
 import asyncio
@@ -591,6 +593,7 @@ async def _deploy_chute(
         chute_id = chute_id.chute_id
     if isinstance(server_id, Server):
         server_id = server_id.server_id
+    probe_port = 8000
     async with get_session() as session:
         chute = (
             (await session.execute(select(Chute).where(Chute.chute_id == chute_id)))
@@ -604,6 +607,13 @@ async def _deploy_chute(
         )
         if not chute or not server:
             raise DeploymentFailure(f"Failed to find chute or server: {chute_id=} {server_id=}")
+
+        # Determine the port to use for the liveness probe.
+        core_version = re.match(
+            r"^([0-9]+\.[0-9]+\.[0-9]+).*", (chute.chutes_version or "0.0.0")
+        ).group(1)
+        if semver.compare(core_version or "0.0.0", "0.3.3") >= 0:
+            probe_port = 8001
 
         # Make sure the node has capacity.
         gpus_allocated = 0
@@ -681,6 +691,7 @@ async def _deploy_chute(
         ]
 
     # Port mappings must be in the environment variables.
+    unique_ports = [8000, 8001]
     for port_object in service.spec.ports[2:]:
         proto = (port_object.protocol or "TCP").upper()
         extra_env.append(
@@ -689,6 +700,8 @@ async def _deploy_chute(
                 value=str(port_object.node_port),
             )
         )
+        if port_object.port not in unique_ports:
+            unique_ports.append(port_object.port)
 
     # Tack on the miner/validator addresses.
     command += [
@@ -871,13 +884,13 @@ async def _deploy_chute(
                                 capabilities={"add": ["IPC_LOCK"]},
                             ),
                             command=command,
-                            ports=[{"containerPort": 8000}],
+                            ports=[{"containerPort": port} for port in unique_ports],
                             readiness_probe=V1Probe(
                                 _exec=V1ExecAction(
                                     command=[
                                         "/bin/sh",
                                         "-c",
-                                        "curl -f http://127.0.0.1:8000/_alive || exit 1",
+                                        f"curl -f http://127.0.0.1:{probe_port}/_alive || exit 1",
                                     ]
                                 ),
                                 initial_delay_seconds=15,
