@@ -236,6 +236,8 @@ class Gepetto:
         """
         Fetch a launch config JWT, if the chutes version supports/requires it.
         """
+        if not chute.chutes_version:
+            return None
         core_version = re.match(r"^([0-9]+\.[0-9]+\.[0-9]+).*", chute.chutes_version).group(1)
         if semver.compare(core_version or "0.0.0", "0.3.0") < 0:
             return None
