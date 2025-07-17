@@ -53,7 +53,7 @@ def invalidate_node_disk_cache(node_name: str):
     Invalidate the disk cache for a specific node.
     """
     if node_name in _disk_info_cache:
-        logger.info(f"Invalidating disk cache for node {node_name}")
+        logger.info(f"Invalidating cached disk size check for {node_name=}")
         del _disk_info_cache[node_name]
 
 
@@ -464,8 +464,20 @@ async def undeploy(deployment_id: str):
         )
     except Exception as exc:
         logger.warning(f"Error deleting job from k8s: {exc}")
+
+    # Handle fallback to cleaning up old deployments, from instances
+    # Created before the 2025-07-17 upgrade.
+    if not node_name:
+        try:
+            k8s_app_client().delete_namespaced_deployment(
+                name=f"chute-{deployment_id}",
+                namespace=settings.namespace,
+            )
+        except Exception:
+            ...
+
     await cleanup_service(deployment_id)
-    await wait_for_deletion(f"chutes/deployment-id={deployment_id}", timeout_seconds=15)
+    await wait_for_deletion(f"chutes/deployment-id={deployment_id}", timeout_seconds=45)
     if node_name:
         invalidate_node_disk_cache(node_name)
 
