@@ -825,6 +825,22 @@ async def _deploy_chute(
                             image_pull_policy="Always",
                             env=[
                                 V1EnvVar(
+                                    name="NCCL_P2P_DISABLE",
+                                    value="1",
+                                ),
+                                V1EnvVar(
+                                    name="NCCL_IB_DISABLE",
+                                    value="1",
+                                ),
+                                V1EnvVar(
+                                    name="NCCL_SHM_DISABLE",
+                                    value="0",
+                                ),
+                                V1EnvVar(
+                                    name="NCCL_NET_GDR_LEVEL",
+                                    value="0",
+                                ),
+                                V1EnvVar(
                                     name="NVIDIA_VISIBLE_DEVICES",
                                     value=",".join(gpu_uuids),
                                 ),
