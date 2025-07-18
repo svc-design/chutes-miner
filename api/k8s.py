@@ -866,7 +866,11 @@ async def _deploy_chute(
                                 ),
                                 V1EnvVar(
                                     name="NCCL_SOCKET_IFNAME",
-                                    value="^docker,lo",
+                                    value="lo",
+                                ),
+                                V1EnvVar(
+                                    name="NCCL_SOCKET_FAMILY",
+                                    value="AF_INET",
                                 ),
                                 V1EnvVar(name="HF_HOME", value="/cache"),
                                 V1EnvVar(name="CIVITAI_HOME", value="/cache/civitai"),

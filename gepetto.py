@@ -1121,6 +1121,7 @@ class Gepetto:
                     await k8s.create_code_config_map(chute)
 
             # Deploy the new version.
+            logger.info(f"Determining if we can deploy {chute.chute_id=} on {server_id=} with {server_gpu_type=} and supported={chute_dict['supported_gpus']}")
             if server_id and chute_dict and server_gpu_type in chute_dict["supported_gpus"]:
                 logger.info(f"Attempting to deploy {chute.chute_id=} on {server_id=}")
                 deployment = None
@@ -1863,7 +1864,7 @@ class Gepetto:
                     # Check for terminated pods (for Jobs that don't update status properly)
                     if not destroyed:
                         for pod in kd.get("pods", []):
-                            pod_state = pod.get("state", {})
+                            pod_state = pod.get("state") or {}
                             if pod_state.get("terminated"):
                                 terminated = pod_state["terminated"]
                                 exit_code = terminated.get("exit_code", 0)
