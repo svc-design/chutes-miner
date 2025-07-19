@@ -407,18 +407,35 @@ class Gepetto:
 
                     # If we have all deployments already (no other miner has this) then no need to scale.
                     total_count = metrics.get("instance_count", 0)
-                    if local_count and local_count >= total_count:
+                    if (
+                        local_count
+                        and local_count >= total_count
+                        and not metrics.get("rate_limit_count")
+                    ):
                         logger.info(
                             f"We have all deployments for {chute_id=} {chute_name}, scaling would be unproductive..."
                         )
                         continue
 
+                    # First, we need to adjust the theoretical usage based on the rate limit counts.
+                    rate_limited = metrics.get("rate_limit_count")
+                    if metrics.get("instance_count") and metrics["instance_count"] >= 5:
+                        # We try up to 5 miners so the rate limit count can be artificially high.
+                        rate_limited /= 5
+
+                    # Calculate approximate compute units.
+                    compute_units = metrics.get("total_compute_time")
+                    if metrics.get("compute_multiplier"):
+                        compute_units *= metrics["compute_multiplier"]
+                    per_invocation = compute_units / (metrics.get("total_invocations", 0) or 1.0)
+                    theoretical = compute_units
+                    if per_invocation and rate_limited:
+                        theoretical += rate_limited * per_invocation
+
                     # Calculate potential gain from a new deployment.
-                    potential_gain = (
-                        metrics.get("total_usage_usd", 0)
-                        if not total_count
-                        else metrics.get("total_usage_usd", 0) / (total_count + 1)
-                    )
+                    potential_gain = theoretical
+                    if total_count:
+                        potential_gain /= total_count + 1
 
                     # See if we have a server that could even handle it.
                     potential_server = await self.optimal_scale_up_server(chute)
@@ -1121,7 +1138,9 @@ class Gepetto:
                     await k8s.create_code_config_map(chute)
 
             # Deploy the new version.
-            logger.info(f"Determining if we can deploy {chute.chute_id=} on {server_id=} with {server_gpu_type=} and supported={chute_dict['supported_gpus']}")
+            logger.info(
+                f"Determining if we can deploy {chute.chute_id=} on {server_id=} with {server_gpu_type=} and supported={chute_dict['supported_gpus']}"
+            )
             if server_id and chute_dict and server_gpu_type in chute_dict["supported_gpus"]:
                 logger.info(f"Attempting to deploy {chute.chute_id=} on {server_id=}")
                 deployment = None
@@ -1284,9 +1303,16 @@ class Gepetto:
         chute_values = {}
         for chute_id, metric in self.remote_metrics.get(chute.validator, {}).items():
             instance_count = metric["instance_count"]
-            value_per_instance = (
-                0 if not instance_count else metric["total_usage_usd"] / instance_count
-            )
+            rate_limited = metric.get("rate_limit_count", 0)
+            if instance_count and instance_count >= 5:
+                rate_limited = rate_limited / 5
+            total_usage_usd = metric.get("total_usage_usd", 0)
+            total_invocations = metric.get("total_invocations", 0)
+            per_invocation_cost = total_usage_usd / (total_invocations or 1.0)
+            theoretical_usage = total_usage_usd
+            if per_invocation_cost and rate_limited:
+                theoretical_usage += rate_limited * per_invocation_cost
+            value_per_instance = 0 if not instance_count else theoretical_usage / instance_count
             chute_values[chute_id] = value_per_instance
 
         # Find all servers that support this chute, sorted by cheapest & most already free GPUs.
