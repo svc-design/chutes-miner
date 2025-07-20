@@ -1080,10 +1080,8 @@ class Gepetto:
                     server_id = deployment.server.server_id
                     server_gpu_type = deployment.server.gpus[0].model_short_ref
                     await self.undeploy(deployment.deployment_id)
-                deployment = None
 
             # Make sure the local chute is updated.
-            chute_dict = None
             if (chute := await self.load_chute(chute_id, version, validator_hotkey)) is None:
                 chute_dict = None
                 try:
@@ -1139,9 +1137,9 @@ class Gepetto:
 
             # Deploy the new version.
             logger.info(
-                f"Determining if we can deploy {chute.chute_id=} on {server_id=} with {server_gpu_type=} and supported={chute_dict['supported_gpus']}"
+                f"Determining if we can deploy {chute.chute_id=} on {server_id=} with {server_gpu_type=} and supported={chute.supported_gpus}"
             )
-            if server_id and chute_dict and server_gpu_type in chute_dict["supported_gpus"]:
+            if server_id and server_gpu_type in chute.supported_gpus:
                 logger.info(f"Attempting to deploy {chute.chute_id=} on {server_id=}")
                 deployment = None
                 try:
