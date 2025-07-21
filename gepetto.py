@@ -1707,7 +1707,7 @@ class Gepetto:
                         deployment.instance_id
                     )
                     if remote_instance:
-                        if remote_instance.get("inst_verified_at") and not deployment.verified_at:
+                        if remote_instance.get("last_verified_at") and not deployment.verified_at:
                             deployment.verified_at = func.now()
                             logger.info(
                                 f"Marking deployment {deployment.deployment_id} as verified based on remote status"
