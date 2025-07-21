@@ -327,7 +327,7 @@ class Gepetto:
                 # For each deployment, check if it's ready to go in kubernetes.
                 for deployment in deployments:
                     core_version = re.match(
-                        r"^([0-9]+\.[0-9]+\.[0-9]+).*", deployment.chute.chutes_version
+                        r"^([0-9]+\.[0-9]+\.[0-9]+).*", deployment.chute.chutes_version or "0.0.0"
                     ).group(1)
                     if semver.compare(core_version or "0.0.0", "0.3.0") >= 0:
                         # The new chutes library activates the chute as part of startup flow via JWT.
