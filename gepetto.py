@@ -1862,7 +1862,7 @@ class Gepetto:
                 # Check for terminated jobs or jobs that never started
                 if (
                     not deployment.active
-                    or not deployment.verified_at
+                    or deployment.verified_at is None
                     and deployment_age >= timedelta(minutes=5)
                 ):
                     try:
