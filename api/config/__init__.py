@@ -75,7 +75,7 @@ class Settings(BaseSettings):
         "parachutes/graval-bootstrap-opencl:0.2.5-cuda",
     )
     graval_bootstrap_image_rocm: str = os.getenv(
-        "GRAVAL_BOOTSTRAP_IMAGE",
+        "GRAVAL_BOOTSTRAP_IMAGE_ROCM",
         "parachutes/graval-bootstrap-opencl:0.2.5-rocm",
     )
     graval_bootstrap_timeout: int = int(os.getenv("GRAVAL_BOOTSTRAP_TIMEOUT", "900"))
