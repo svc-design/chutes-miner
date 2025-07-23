@@ -955,6 +955,19 @@ async def _deploy_chute(
         invalidate_node_disk_cache(server.name)
         return deployment, created_job
     except ApiException as exc:
+        async with get_session() as session:
+            deployment = (
+                (
+                    await session.execute(
+                        select(Deployment).where(Deployment.deployment_id == deployment_id)
+                    )
+                )
+                .unique()
+                .scalar_one_or_none()
+            )
+            if deployment:
+                await session.delete(deployment)
+                await session.commit()
         try:
             k8s_batch_client().delete_namespaced_job(
                 name=f"chute-{deployment_id}",
