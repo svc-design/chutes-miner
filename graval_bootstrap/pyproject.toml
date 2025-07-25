@@ -11,7 +11,7 @@ python = "^3.12"
 fastapi = "^0.115.5"
 uvicorn = "^0.32.0"
 substrate-interface = "^1.7.11"
-graval = "0.2.5"
+graval = "0.2.6"
 ruff = "^0.7.3"
 aiohttp = "^3.12.0"
 
