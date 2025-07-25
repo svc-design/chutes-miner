@@ -788,8 +788,8 @@ class Gepetto:
 
         # XXX This is where you as a miner definitely want to customize the strategy!
         supported_gpus = set(chute.supported_gpus)
-        if supported_gpus - set(["h200"]):
-            # Generally speaking, non-h200 GPUs typically have lower compute multipliers than
+        if supported_gpus - set(["h200", "b200"]):
+            # Generally speaking, non-h200/b200 GPUs typically have lower compute multipliers than
             # the job would provide because they regularly do not have even one request in flight
             # on average, although that is not always the case, so this should be updated to be smarter.
             logger.info(
