@@ -255,7 +255,12 @@ class Gepetto:
                     headers=headers,
                     params=params,
                 ) as resp:
-                    if resp.status != 200:
+                    if resp.status == 423:
+                        logger.warning(
+                            f"Unable to scale up {chute.chute_id} at this time, "
+                            f"at capacity or blocked for another reason: {await resp.text()}"
+                        )
+                    elif resp.status != 200:
                         logger.error(
                             f"Failed to fetch launch token: {resp.status=} -> {await resp.text()}"
                         )
