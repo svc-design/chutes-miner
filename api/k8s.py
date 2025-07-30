@@ -666,6 +666,9 @@ async def _deploy_chute(
     }
     if config_id:
         deployment_labels["chutes/config-id"] = config_id
+    if job_id:
+        deployment_labels["chutes/job-id"] = job_id
+        deployment_labels["chutes/job"] = "true"
 
     # Command will vary depending on chutes version.
     extra_env = []
