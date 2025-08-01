@@ -1,0 +1,74 @@
+name: init-k8s
+
+on:
+  workflow_dispatch:
+    inputs:
+      kubernetes:
+        description: Kubernetes version
+        default: "v1.29.9"
+        required: true
+      helm:
+        description: Helm version
+        default: "v3.9.4"
+        required: true
+      cilium:
+        description: Cilium version
+        default: "v1.13.4"
+        required: true
+      masters:
+        description: Comma separated master IPs
+        required: true
+      nodes:
+        description: Comma separated worker node IPs
+        required: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install sealos
+        run: |
+          curl -fsSL https://github.com/labring/sealos/releases/latest/download/sealos-linux-amd64 -o sealos
+          chmod +x sealos
+          sudo mv sealos /usr/local/bin/sealos
+      - name: Init Kubernetes cluster
+        run: |
+          master_list="$(echo "${{ inputs.masters }}" | tr ',' ' ')"
+          sealos run labring/kubernetes:${{ inputs.kubernetes }} \
+            labring/cilium:${{ inputs.cilium }} \
+            labring/helm:${{ inputs.helm }} \
+            --masters "$master_list" \
+            --user root --pk /root/.ssh/id_rsa --env '{}' \
+            --cmd 'kubeadm init --skip-phases=addon/kube-proxy'
+          if [ -n "${{ inputs.nodes }}" ]; then
+            node_list="$(echo "${{ inputs.nodes }}" | tr ',' ' ')"
+            sealos add --nodes "$node_list"
+          fi
+
+  cilium_egress:
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - name: Configure Cilium egress gateway
+        run: |
+          helm repo add cilium https://helm.cilium.io
+          helm repo update
+          helm upgrade cilium cilium/cilium -n kube-system -f cilium-values.yaml
+
+  post_setup:
+    runs-on: ubuntu-latest
+    needs: cilium_egress
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run ansible playbooks
+        working-directory: ansible
+        run: |
+          ansible-playbook -i inventory.yml site.yml -D
+          ansible-playbook -i inventory.yml extras.yml -D
+      - name: Label GPU node
+        run: |
+          kubectl label node chutes-miner-gpu-0 nvidia.com/gpu.count=1 --overwrite
+          kubectl label node chutes-miner-gpu-0 nvidia.com/gpu.present=true --overwrite
+          kubectl label node chutes-miner-gpu-0 nvidia.com/gpu.deploy.operator-validator=true
+          kubectl label node chutes-miner-gpu-0 chutes/external-ip=8.215.60.133 --overwrite
+          kubectl annotate node chutes-miner-gpu-0 kubeadm.alpha.kubernetes.io/internal-ip=172.31.23.69 --overwrite
