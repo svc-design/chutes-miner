@@ -1,19 +1,22 @@
 """
-Helper for kubernetes interactions.
+Helper for kubernetes interactions (now using jobs instead of deployments).
 """
 
+import re
+import semver
 import math
 import uuid
+import asyncio
 import traceback
+from datetime import datetime, timedelta
 from loguru import logger
 from typing import List, Dict, Any
 from kubernetes import watch
 from kubernetes.client import (
-    V1Deployment,
+    V1Job,
+    V1JobSpec,
     V1Service,
     V1ObjectMeta,
-    V1DeploymentSpec,
-    V1DeploymentStrategy,
     V1PodTemplateSpec,
     V1PodSpec,
     V1Container,
@@ -39,7 +42,145 @@ from api.database import get_session
 from api.server.schemas import Server
 from api.chute.schemas import Chute
 from api.deployment.schemas import Deployment
-from api.config import k8s_core_client, k8s_app_client
+from api.config import k8s_core_client, k8s_batch_client, k8s_app_client
+
+
+# Cache disk stats.
+_disk_info_cache: dict[str, tuple[dict[str, float], datetime]] = {}
+_disk_info_locks: dict[str, asyncio.Lock] = {}
+
+
+def invalidate_node_disk_cache(node_name: str):
+    """
+    Invalidate the disk cache for a specific node.
+    """
+    if node_name in _disk_info_cache:
+        logger.info(f"Invalidating cached disk size check for {node_name=}")
+        del _disk_info_cache[node_name]
+
+
+async def get_node_disk_info(node_name: str) -> Dict[str, float]:
+    """
+    Get disk space information for a specific node with caching.
+    Returns dict with total_gb, available_gb, used_gb
+    """
+    # Check cache first
+    if node_name in _disk_info_cache:
+        disk_info, expiry_time = _disk_info_cache[node_name]
+        if datetime.now() < expiry_time:
+            return disk_info
+
+    # Get or create a lock for this node
+    if node_name not in _disk_info_locks:
+        _disk_info_locks[node_name] = asyncio.Lock()
+
+    async with _disk_info_locks[node_name]:
+        if node_name in _disk_info_cache:
+            disk_info, expiry_time = _disk_info_cache[node_name]
+            if datetime.now() < expiry_time:
+                return disk_info
+
+        logger.info(f"Fetching fresh disk info for node {node_name}")
+        try:
+            pods = k8s_core_client().list_pod_for_all_namespaces(
+                field_selector=f"spec.nodeName={node_name}"
+            )
+            used_disk_gb = 0
+            for pod in pods.items:
+                if pod.status.phase not in ["Running", "Pending"]:
+                    continue
+
+                # Check containers for ephemeral-storage requests
+                if pod.spec.containers:
+                    for container in pod.spec.containers:
+                        if container.resources and container.resources.requests:
+                            ephemeral_storage = container.resources.requests.get(
+                                "ephemeral-storage", "0"
+                            )
+                            if isinstance(ephemeral_storage, str):
+                                if ephemeral_storage.endswith("Gi"):
+                                    used_disk_gb += float(ephemeral_storage.replace("Gi", ""))
+                                elif ephemeral_storage.endswith("G"):
+                                    used_disk_gb += float(ephemeral_storage.replace("G", ""))
+                                elif ephemeral_storage.endswith("Mi"):
+                                    used_disk_gb += (
+                                        float(ephemeral_storage.replace("Mi", "")) / 1024
+                                    )
+                                elif ephemeral_storage.endswith("M"):
+                                    used_disk_gb += float(ephemeral_storage.replace("M", "")) / 1024
+                                elif ephemeral_storage.endswith("Ki"):
+                                    used_disk_gb += (
+                                        float(ephemeral_storage.replace("Ki", "")) / 1024 / 1024
+                                    )
+
+                # Also check init containers
+                if pod.spec.init_containers:
+                    for container in pod.spec.init_containers:
+                        if container.resources and container.resources.requests:
+                            ephemeral_storage = container.resources.requests.get(
+                                "ephemeral-storage", "0"
+                            )
+                            if isinstance(ephemeral_storage, str):
+                                if ephemeral_storage.endswith("Gi"):
+                                    used_disk_gb += float(ephemeral_storage.replace("Gi", ""))
+                                elif ephemeral_storage.endswith("G"):
+                                    used_disk_gb += float(ephemeral_storage.replace("G", ""))
+                                elif ephemeral_storage.endswith("Mi"):
+                                    used_disk_gb += (
+                                        float(ephemeral_storage.replace("Mi", "")) / 1024
+                                    )
+                                elif ephemeral_storage.endswith("M"):
+                                    used_disk_gb += float(ephemeral_storage.replace("M", "")) / 1024
+                                elif ephemeral_storage.endswith("Ki"):
+                                    used_disk_gb += (
+                                        float(ephemeral_storage.replace("Ki", "")) / 1024 / 1024
+                                    )
+
+            # Get node capacity
+            node = k8s_core_client().read_node(name=node_name)
+
+            # Try to get ephemeral storage capacity
+            ephemeral_storage = node.status.capacity.get("ephemeral-storage", "0")
+            if ephemeral_storage.endswith("Ki"):
+                total_disk_gb = int(ephemeral_storage.replace("Ki", "")) / 1024 / 1024
+            elif ephemeral_storage.endswith("Mi"):
+                total_disk_gb = int(ephemeral_storage.replace("Mi", "")) / 1024
+            elif ephemeral_storage.endswith("Gi"):
+                total_disk_gb = int(ephemeral_storage.replace("Gi", ""))
+            else:
+                logger.warning(
+                    "Could not determine node ephemeral storage capacity, using default=100"
+                )
+                total_disk_gb = 100
+
+            # Reserve some disk space for system operations
+            system_reserved_gb = 20
+            available_disk_gb = total_disk_gb - used_disk_gb - system_reserved_gb
+            disk_info = {
+                "total_gb": total_disk_gb,
+                "available_gb": max(0, available_disk_gb),
+                "used_gb": used_disk_gb,
+            }
+
+            # Cache the result with 5 minute expiry
+            expiry_time = datetime.now() + timedelta(minutes=5)
+            _disk_info_cache[node_name] = (disk_info, expiry_time)
+            logger.info(
+                f"Node {node_name} disk info: total={total_disk_gb}GB, used={used_disk_gb}GB, available={available_disk_gb}GB"
+            )
+            return disk_info
+
+        except Exception as e:
+            logger.warning(f"Failed to get disk info for node {node_name}: {e}")
+            error_result = {
+                "total_gb": 0,
+                "available_gb": 0,
+                "used_gb": 0,
+            }
+            expiry_time = datetime.now() + timedelta(minutes=1)
+            _disk_info_cache[node_name] = (error_result, expiry_time)
+
+            return error_result
 
 
 async def get_kubernetes_nodes() -> List[Dict]:
@@ -74,6 +215,10 @@ async def get_kubernetes_nodes() -> List[Dict]:
                 if total_memory_gb <= gpu_count
                 else min(gpu_mem_gb, math.floor(total_memory_gb * 0.8 / gpu_count))
             )
+
+            # Get disk space information
+            disk_info = await get_node_disk_info(node.metadata.name)
+
             node_info = {
                 "name": node.metadata.name,
                 "validator": node.metadata.labels.get("chutes/validator"),
@@ -82,6 +227,9 @@ async def get_kubernetes_nodes() -> List[Dict]:
                 "ip_address": node.metadata.labels.get("chutes/external-ip"),
                 "cpu_per_gpu": cpus_per_gpu,
                 "memory_gb_per_gpu": memory_gb_per_gpu,
+                "disk_total_gb": disk_info.get("total_gb", 0),
+                "disk_available_gb": disk_info.get("available_gb", 0),
+                "disk_used_gb": disk_info.get("used_gb", 0),
             }
             nodes.append(node_info)
     except Exception as e:
@@ -90,40 +238,64 @@ async def get_kubernetes_nodes() -> List[Dict]:
     return nodes
 
 
-def is_deployment_ready(deployment):
+async def check_node_has_disk_available(node_name: str, required_disk_gb: int) -> bool:
     """
-    Check if a deployment is "ready"
+    Check if a node has sufficient disk space available for a deployment.
     """
-    return (
-        deployment.status.available_replicas is not None
-        and deployment.status.available_replicas == deployment.spec.replicas
-        and deployment.status.ready_replicas == deployment.spec.replicas
-        and deployment.status.updated_replicas == deployment.spec.replicas
-    )
+    disk_info = await get_node_disk_info(node_name)
+    return disk_info.get("available_gb", 0) >= required_disk_gb
 
 
-def _extract_deployment_info(deployment: Any) -> Dict:
+def is_job_ready(job):
     """
-    Extract deployment info from the deployment objects.
+    Check if a job's pod is running and ready
     """
-    deploy_info = {
-        "uuid": deployment.metadata.uid,
-        "deployment_id": deployment.metadata.labels.get("chutes/deployment-id"),
-        "name": deployment.metadata.name,
-        "namespace": deployment.metadata.namespace,
-        "labels": deployment.metadata.labels,
-        "chute_id": deployment.metadata.labels.get("chutes/chute-id"),
-        "version": deployment.metadata.labels.get("chutes/version"),
-        "node_selector": deployment.spec.template.spec.node_selector,
-    }
-    deploy_info["ready"] = is_deployment_ready(deployment)
-    pod_label_selector = ",".join(
-        [f"{k}={v}" for k, v in deployment.spec.selector.match_labels.items()]
-    )
+    # Get pods for this job
+    pod_label_selector = f"chutes/deployment-id={job.metadata.labels.get('chutes/deployment-id')}"
     pods = k8s_core_client().list_namespaced_pod(
-        namespace=deployment.metadata.namespace, label_selector=pod_label_selector
+        namespace=job.metadata.namespace, label_selector=pod_label_selector
     )
-    deploy_info["pods"] = []
+
+    for pod in pods.items:
+        if pod.status.phase == "Running":
+            # Check if all containers are ready
+            if pod.status.container_statuses:
+                all_ready = all(cs.ready for cs in pod.status.container_statuses)
+                if all_ready:
+                    return True
+    return False
+
+
+def _extract_job_info(job: Any) -> Dict:
+    """
+    Extract job info from the job objects.
+    """
+    job_info = {
+        "uuid": job.metadata.uid,
+        "deployment_id": job.metadata.labels.get("chutes/deployment-id"),
+        "name": job.metadata.name,
+        "namespace": job.metadata.namespace,
+        "labels": job.metadata.labels,
+        "chute_id": job.metadata.labels.get("chutes/chute-id"),
+        "version": job.metadata.labels.get("chutes/version"),
+        "node_selector": job.spec.template.spec.node_selector,
+    }
+
+    # Job status information
+    job_info["ready"] = is_job_ready(job)
+    job_info["status"] = {
+        "active": job.status.active or 0,
+        "succeeded": job.status.succeeded or 0,
+        "failed": job.status.failed or 0,
+        "completion_time": job.status.completion_time,
+        "start_time": job.status.start_time,
+    }
+
+    pod_label_selector = f"chutes/deployment-id={job.metadata.labels.get('chutes/deployment-id')}"
+    pods = k8s_core_client().list_namespaced_pod(
+        namespace=job.metadata.namespace, label_selector=pod_label_selector
+    )
+    job_info["pods"] = []
     for pod in pods.items:
         state = pod.status.container_statuses[0].state if pod.status.container_statuses else None
         last_state = (
@@ -156,36 +328,67 @@ def _extract_deployment_info(deployment: Any) -> Dict:
             if last_state
             else None,
         }
-        deploy_info["pods"].append(pod_info)
-        deploy_info["node"] = pod.spec.node_name
-    return deploy_info
+        job_info["pods"].append(pod_info)
+        job_info["node"] = pod.spec.node_name
+    return job_info
 
 
 async def get_deployment(deployment_id: str):
     """
-    Get a single deployment by ID.
+    Get a single job by deployment ID.
     """
-    deployment = k8s_app_client().read_namespaced_deployment(
+    job = k8s_batch_client().read_namespaced_job(
         namespace=settings.namespace,
         name=f"chute-{deployment_id}",
     )
-    return _extract_deployment_info(deployment)
+    return _extract_job_info(job)
+
+
+get_job = get_deployment
 
 
 async def get_deployed_chutes() -> List[Dict]:
     """
-    Get all chutes deployments from kubernetes.
+    Get all chutes jobs from kubernetes.
+    """
+    jobs = []
+    label_selector = "chutes/chute=true"
+    job_list = k8s_batch_client().list_namespaced_job(
+        namespace=settings.namespace, label_selector=label_selector
+    )
+    for job in job_list.items:
+        jobs.append(_extract_job_info(job))
+        logger.info(f"Found chute job: {job.metadata.name} in namespace {job.metadata.namespace}")
+    return jobs
+
+
+async def get_deployed_chutes_legacy() -> List[Dict]:
+    """
+    Get all legacy chutes deployments (V1Deployment) from kubernetes.
+    This is for backwards compatibility with the old deployment-based system.
     """
     deployments = []
     label_selector = "chutes/chute=true"
-    deployment_list = k8s_app_client().list_namespaced_deployment(
-        namespace=settings.namespace, label_selector=label_selector
-    )
-    for deployment in deployment_list.items:
-        deployments.append(_extract_deployment_info(deployment))
-        logger.info(
-            f"Found chute deployment: {deployment.metadata.name} in namespace {deployment.metadata.namespace}"
+    try:
+        deployment_list = k8s_app_client().list_namespaced_deployment(
+            namespace=settings.namespace, label_selector=label_selector
         )
+        for deployment in deployment_list.items:
+            deploy_info = {
+                "deployment_id": deployment.metadata.labels.get("chutes/deployment-id"),
+                "name": deployment.metadata.name,
+                "namespace": deployment.metadata.namespace,
+                "labels": deployment.metadata.labels,
+                "chute_id": deployment.metadata.labels.get("chutes/chute-id"),
+                "version": deployment.metadata.labels.get("chutes/version"),
+                "is_legacy": True,
+            }
+            deployments.append(deploy_info)
+            logger.info(
+                f"Found legacy chute deployment: {deployment.metadata.name} in namespace {deployment.metadata.namespace}"
+            )
+    except Exception as e:
+        logger.error(f"Failed to get legacy deployments: {e}")
     return deployments
 
 
@@ -244,23 +447,56 @@ async def wait_for_deletion(label_selector: str, timeout_seconds: int = 120):
 
 async def undeploy(deployment_id: str):
     """
-    Delete a deployment, and associated service.
+    Delete a job, and associated service.
     """
+    node_name = None
     try:
-        k8s_core_client().delete_namespaced_service(
-            name=f"chute-service-{deployment_id}",
-            namespace=settings.namespace,
-        )
-    except Exception as exc:
-        logger.warning(f"Error deleting deployment service from k8s: {exc}")
-    try:
-        k8s_app_client().delete_namespaced_deployment(
+        job = k8s_batch_client().read_namespaced_job(
             name=f"chute-{deployment_id}",
             namespace=settings.namespace,
         )
+        node_name = job.spec.template.spec.node_name
+    except Exception:
+        pass
+    try:
+        k8s_batch_client().delete_namespaced_job(
+            name=f"chute-{deployment_id}",
+            namespace=settings.namespace,
+            propagation_policy="Foreground",
+        )
     except Exception as exc:
-        logger.warning(f"Error deleting deployment from k8s: {exc}")
-    await wait_for_deletion(f"chutes/deployment-id={deployment_id}", timeout_seconds=15)
+        logger.warning(f"Error deleting job from k8s: {exc}")
+
+    # Handle fallback to cleaning up old deployments, from instances
+    # Created before the 2025-07-17 upgrade.
+    if not node_name:
+        try:
+            k8s_app_client().delete_namespaced_deployment(
+                name=f"chute-{deployment_id}",
+                namespace=settings.namespace,
+            )
+        except Exception:
+            ...
+
+    await cleanup_service(deployment_id)
+    await wait_for_deletion(f"chutes/deployment-id={deployment_id}", timeout_seconds=45)
+    if node_name:
+        invalidate_node_disk_cache(node_name)
+
+
+async def get_pods_by_label(label_selector: str):
+    """
+    Get all pods matching a label selector.
+    """
+    try:
+        pods = k8s_core_client().list_namespaced_pod(
+            namespace=settings.namespace,
+            label_selector=label_selector,
+        )
+        return [pod.to_dict() for pod in pods.items]
+    except Exception as exc:
+        logger.error(f"Error getting pods by label {label_selector}: {exc}")
+        return []
 
 
 async def create_code_config_map(chute: Chute):
@@ -287,30 +523,77 @@ async def create_code_config_map(chute: Chute):
             raise
 
 
-# def get_used_ports(node_name):
-#    ports = set()
-#    pods = k8s_core_client().list_pod_for_all_namespaces(field_selector=f'spec.nodeName={node_name}')
-#    for pod in pods.items:
-#        if pod.spec.host_network:
-#            for container in pod.spec.containers:
-#                if container.ports:
-#                    for port in container.ports:
-#                        if port.container_port:
-#                            ports.add(port.container_port)
-#                        if port.host_port:
-#                            ports.add(port.host_port)
-#    return sorted(list(ports))
-
-
-async def deploy_chute(chute_id: str, server_id: str):
+async def create_service_for_deployment(
+    chute: Chute, deployment_id: str, extra_service_ports: list[dict[str, Any]] = []
+):
     """
-    Deploy a chute!
+    Create a service for the specified deployment.
+    """
+
+    # And the primary chutes service.
+    service = V1Service(
+        metadata=V1ObjectMeta(
+            name=f"chute-service-{deployment_id}",
+            labels={
+                "chutes/deployment-id": deployment_id,
+                "chutes/chute": "true",
+                "chutes/chute-id": chute.chute_id,
+                "chutes/version": chute.version,
+            },
+        ),
+        spec=V1ServiceSpec(
+            type="NodePort",
+            external_traffic_policy="Local",
+            selector={
+                "chutes/deployment-id": deployment_id,
+            },
+            ports=[
+                V1ServicePort(port=8000, target_port=8000, protocol="TCP", name="chute-8000"),
+                V1ServicePort(port=8001, target_port=8001, protocol="TCP", name="chute-8001"),
+            ]
+            + [
+                V1ServicePort(
+                    port=svc["port"],
+                    target_port=svc["port"],
+                    protocol=svc["proto"],
+                    name=f"chute-{svc['port']}",
+                )
+                for svc in extra_service_ports
+            ],
+        ),
+    )
+
+    # Create, delete any that may have been successful upon failure.
+    try:
+        return k8s_core_client().create_namespaced_service(
+            namespace=settings.namespace, body=service
+        )
+    except Exception:
+        raise DeploymentFailure(
+            f"Failed to create service for {chute.chute_id=} and {deployment_id=}"
+        )
+
+
+async def _deploy_chute(
+    chute_id: str,
+    server_id: str,
+    deployment_id: str,
+    service: Any,
+    token: str = None,
+    job_id: str = None,
+    config_id: str = None,
+    disk_gb: int = 10,
+    extra_labels: dict[str, str] = {},
+):
+    """
+    Deploy a chute as a Job!
     """
     # Backwards compatible types...
     if isinstance(chute_id, Chute):
         chute_id = chute_id.chute_id
     if isinstance(server_id, Server):
         server_id = server_id.server_id
+    probe_port = 8000
     async with get_session() as session:
         chute = (
             (await session.execute(select(Chute).where(Chute.chute_id == chute_id)))
@@ -325,8 +608,14 @@ async def deploy_chute(chute_id: str, server_id: str):
         if not chute or not server:
             raise DeploymentFailure(f"Failed to find chute or server: {chute_id=} {server_id=}")
 
+        # Determine the port to use for the liveness probe.
+        core_version = re.match(
+            r"^([0-9]+\.[0-9]+\.[0-9]+).*", (chute.chutes_version or "0.0.0")
+        ).group(1)
+        if semver.compare(core_version or "0.0.0", "0.3.3") >= 0:
+            probe_port = 8001
+
         # Make sure the node has capacity.
-        # used_ports = get_used_ports(server.name)
         gpus_allocated = 0
         available_gpus = {gpu.gpu_id for gpu in server.gpus if gpu.verified}
         for deployment in server.deployments:
@@ -337,9 +626,18 @@ async def deploy_chute(chute_id: str, server_id: str):
                 f"Server {server.server_id} name={server.name} cannot allocate {chute.gpu_count} GPUs, already using {gpus_allocated} of {len(server.gpus)}"
             )
 
+        # Check disk space availability
+        if not await check_node_has_disk_available(server.name, disk_gb):
+            raise DeploymentFailure(
+                f"Server {server.server_id} name={server.name} does not have {disk_gb}GB disk space available"
+            )
+
         # Immediately track this deployment (before actually creating it) to avoid allocation contention.
-        deployment_id = str(uuid.uuid4())
         gpus = list([gpu for gpu in server.gpus if gpu.gpu_id in available_gpus])[: chute.gpu_count]
+        gpu_uuids = [f"GPU-{str(uuid.UUID(gpu.gpu_id))}" for gpu in gpus]
+        logger.info(
+            f"Assigning {len(gpu_uuids)} GPUs [{gpu_uuids}] to {chute_id=} on {server.name=}"
+        )
         deployment = Deployment(
             deployment_id=deployment_id,
             server_id=server.server_id,
@@ -349,12 +647,14 @@ async def deploy_chute(chute_id: str, server_id: str):
             active=False,
             verified_at=None,
             stub=True,
+            job_id=job_id,
+            config_id=config_id,
         )
         session.add(deployment)
         deployment.gpus = gpus
         await session.commit()
 
-    # Create the deployment.
+    # Create the job.
     cpu = str(server.cpu_per_gpu * chute.gpu_count)
     ram = str(server.memory_per_gpu * chute.gpu_count) + "Gi"
     code_uuid = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{chute.chute_id}::{chute.version}"))
@@ -364,16 +664,67 @@ async def deploy_chute(chute_id: str, server_id: str):
         "chutes/chute-id": chute.chute_id,
         "chutes/version": chute.version,
     }
+    if config_id:
+        deployment_labels["chutes/config-id"] = config_id
+    if job_id:
+        deployment_labels["chutes/job-id"] = job_id
+        deployment_labels["chutes/job"] = "true"
 
-    deployment = V1Deployment(
+    # Command will vary depending on chutes version.
+    extra_env = []
+    command = [
+        "chutes",
+        "run",
+        chute.ref_str,
+        "--port",
+        "8000",
+    ]
+    if not token:
+        command += ["--graval-seed", str(server.seed)]
+    else:
+        extra_env += [
+            V1EnvVar(
+                name="CHUTES_LAUNCH_JWT",
+                value=token,
+            ),
+            V1EnvVar(
+                name="CHUTES_EXTERNAL_HOST",
+                value=server.ip_address,
+            ),
+        ]
+
+    # Port mappings must be in the environment variables.
+    unique_ports = [8000, 8001]
+    for port_object in service.spec.ports[2:]:
+        proto = (port_object.protocol or "TCP").upper()
+        extra_env.append(
+            V1EnvVar(
+                name=f"CHUTES_PORT_{proto}_{port_object.port}",
+                value=str(port_object.node_port),
+            )
+        )
+        if port_object.port not in unique_ports:
+            unique_ports.append(port_object.port)
+
+    # Tack on the miner/validator addresses.
+    command += [
+        "--miner-ss58",
+        settings.miner_ss58,
+        "--validator-ss58",
+        server.validator,
+    ]
+
+    # Create the job object.
+    job = V1Job(
         metadata=V1ObjectMeta(
             name=f"chute-{deployment_id}",
             labels=deployment_labels,
         ),
-        spec=V1DeploymentSpec(
-            replicas=1,
-            strategy=V1DeploymentStrategy(type="Recreate"),
-            selector={"matchLabels": {"chutes/deployment-id": deployment_id}},
+        spec=V1JobSpec(
+            parallelism=1,
+            completions=1,
+            backoff_limit=0,
+            ttl_seconds_after_finished=300,
             template=V1PodTemplateSpec(
                 metadata=V1ObjectMeta(
                     labels=deployment_labels,
@@ -384,6 +735,7 @@ async def deploy_chute(chute_id: str, server_id: str):
                     },
                 ),
                 spec=V1PodSpec(
+                    restart_policy="Never",
                     node_name=server.name,
                     runtime_class_name="nvidia-container-runtime",
                     volumes=[
@@ -396,7 +748,15 @@ async def deploy_chute(chute_id: str, server_id: str):
                         V1Volume(
                             name="cache",
                             host_path=V1HostPathVolumeSource(
-                                path="/var/snap/cache", type="DirectoryOrCreate"
+                                path=f"/var/snap/cache/{chute.chute_id}",
+                                type="DirectoryOrCreate",
+                            ),
+                        ),
+                        V1Volume(
+                            name="raw-cache",
+                            host_path=V1HostPathVolumeSource(
+                                path="/var/snap/cache",
+                                type="DirectoryOrCreate",
                             ),
                         ),
                         V1Volume(
@@ -407,7 +767,7 @@ async def deploy_chute(chute_id: str, server_id: str):
                         ),
                         V1Volume(
                             name="tmp",
-                            empty_dir=V1EmptyDirVolumeSource(size_limit="10Gi"),
+                            empty_dir=V1EmptyDirVolumeSource(size_limit=f"{disk_gb}Gi"),
                         ),
                         V1Volume(
                             name="shm",
@@ -423,6 +783,10 @@ async def deploy_chute(chute_id: str, server_id: str):
                                 "mkdir -p /cache/hub /cache/civitai && chmod -R 777 /cache && python /scripts/cache_cleanup.py"
                             ],
                             env=[
+                                V1EnvVar(
+                                    name="CLEANUP_EXCLUDE",
+                                    value=chute.chute_id,
+                                ),
                                 V1EnvVar(
                                     name="HF_HOME",
                                     value="/cache",
@@ -445,7 +809,7 @@ async def deploy_chute(chute_id: str, server_id: str):
                                 ),
                             ],
                             volume_mounts=[
-                                V1VolumeMount(name="cache", mount_path="/cache"),
+                                V1VolumeMount(name="raw-cache", mount_path="/cache"),
                                 V1VolumeMount(
                                     name="cache-cleanup",
                                     mount_path="/scripts",
@@ -464,22 +828,6 @@ async def deploy_chute(chute_id: str, server_id: str):
                             image_pull_policy="Always",
                             env=[
                                 V1EnvVar(
-                                    name="CHUTES_EXECUTION_CONTEXT",
-                                    value="REMOTE",
-                                ),
-                                V1EnvVar(
-                                    name="VLLM_DISABLE_TELEMETRY",
-                                    value="1",
-                                ),
-                                V1EnvVar(
-                                    name="NCCL_DEBUG",
-                                    value="INFO",
-                                ),
-                                V1EnvVar(
-                                    name="NCCL_SOCKET_IFNAME",
-                                    value="^docker,lo",
-                                ),
-                                V1EnvVar(
                                     name="NCCL_P2P_DISABLE",
                                     value="1",
                                 ),
@@ -496,22 +844,51 @@ async def deploy_chute(chute_id: str, server_id: str):
                                     value="0",
                                 ),
                                 V1EnvVar(
-                                    name="CUDA_VISIBLE_DEVICES",
-                                    value=",".join([str(idx) for idx in range(chute.gpu_count)]),
+                                    name="NVIDIA_VISIBLE_DEVICES",
+                                    value=",".join(gpu_uuids),
+                                ),
+                                V1EnvVar(
+                                    name="CHUTES_PORT_PRIMARY",
+                                    value=str(service.spec.ports[0].node_port),
+                                ),
+                                V1EnvVar(
+                                    name="CHUTES_PORT_LOGGING",
+                                    value=str(service.spec.ports[1].node_port),
+                                ),
+                                V1EnvVar(
+                                    name="CHUTES_EXECUTION_CONTEXT",
+                                    value="REMOTE",
+                                ),
+                                V1EnvVar(
+                                    name="VLLM_DISABLE_TELEMETRY",
+                                    value="1",
+                                ),
+                                V1EnvVar(
+                                    name="NCCL_DEBUG",
+                                    value="INFO",
+                                ),
+                                V1EnvVar(
+                                    name="NCCL_SOCKET_IFNAME",
+                                    value="lo",
+                                ),
+                                V1EnvVar(
+                                    name="NCCL_SOCKET_FAMILY",
+                                    value="AF_INET",
                                 ),
                                 V1EnvVar(name="HF_HOME", value="/cache"),
                                 V1EnvVar(name="CIVITAI_HOME", value="/cache/civitai"),
-                            ],
+                            ]
+                            + extra_env,
                             resources=V1ResourceRequirements(
                                 requests={
                                     "cpu": cpu,
                                     "memory": ram,
-                                    "nvidia.com/gpu": str(chute.gpu_count),
+                                    "ephemeral-storage": f"{disk_gb}Gi",
                                 },
                                 limits={
                                     "cpu": cpu,
                                     "memory": ram,
-                                    "nvidia.com/gpu": str(chute.gpu_count),
+                                    "ephemeral-storage": f"{disk_gb}Gi",
                                 },
                             ),
                             volume_mounts=[
@@ -529,26 +906,14 @@ async def deploy_chute(chute_id: str, server_id: str):
                                 # read_only_root_filesystem=True,
                                 capabilities={"add": ["IPC_LOCK"]},
                             ),
-                            command=[
-                                "chutes",
-                                "run",
-                                chute.ref_str,
-                                "--port",
-                                "8000",
-                                "--graval-seed",
-                                str(server.seed),
-                                "--miner-ss58",
-                                settings.miner_ss58,
-                                "--validator-ss58",
-                                server.validator,
-                            ],
-                            ports=[{"containerPort": 8000}],
+                            command=command,
+                            ports=[{"containerPort": port} for port in unique_ports],
                             readiness_probe=V1Probe(
                                 _exec=V1ExecAction(
                                     command=[
                                         "/bin/sh",
                                         "-c",
-                                        "curl -f http://127.0.0.1:8000/_alive || exit 1",
+                                        f"curl -f http://127.0.0.1:{probe_port}/_alive || exit 1",
                                     ]
                                 ),
                                 initial_delay_seconds=15,
@@ -564,35 +929,14 @@ async def deploy_chute(chute_id: str, server_id: str):
         ),
     )
 
-    # And the service that exposes it.
-    service = V1Service(
-        metadata=V1ObjectMeta(
-            name=f"chute-service-{deployment_id}",
-            labels={
-                "chutes/deployment-id": deployment_id,
-                "chutes/chute": "true",
-                "chutes/chute-id": chute.chute_id,
-                "chutes/version": chute.version,
-            },
-        ),
-        spec=V1ServiceSpec(
-            type="NodePort",
-            external_traffic_policy="Local",
-            selector={
-                "chutes/deployment-id": deployment_id,
-            },
-            ports=[V1ServicePort(port=8000, target_port=8000, protocol="TCP")],
-        ),
-    )
-
+    # Create the job in k8s.
     try:
-        created_service = k8s_core_client().create_namespaced_service(
-            namespace=settings.namespace, body=service
+        created_job = k8s_batch_client().create_namespaced_job(
+            namespace=settings.namespace, body=job
         )
-        created_deployment = k8s_app_client().create_namespaced_deployment(
-            namespace=settings.namespace, body=deployment
-        )
-        deployment_port = created_service.spec.ports[0].node_port
+
+        # Track the primary port in the database.
+        deployment_port = service.spec.ports[0].node_port
         async with get_session() as session:
             deployment = (
                 (
@@ -611,22 +955,77 @@ async def deploy_chute(chute_id: str, server_id: str):
             await session.commit()
             await session.refresh(deployment)
 
-        return deployment, created_deployment, created_service
+        invalidate_node_disk_cache(server.name)
+        return deployment, created_job
     except ApiException as exc:
-        try:
-            k8s_core_client().delete_namespaced_service(
-                name=f"chute-service-{deployment_id}",
-                namespace=settings.namespace,
+        async with get_session() as session:
+            deployment = (
+                (
+                    await session.execute(
+                        select(Deployment).where(Deployment.deployment_id == deployment_id)
+                    )
+                )
+                .unique()
+                .scalar_one_or_none()
             )
-        except Exception:
-            ...
+            if deployment:
+                await session.delete(deployment)
+                await session.commit()
         try:
-            k8s_core_client().delete_namespaced_deployment(
+            k8s_batch_client().delete_namespaced_job(
                 name=f"chute-{deployment_id}",
                 namespace=settings.namespace,
+                propagation_policy="Foreground",
             )
         except Exception:
             ...
         raise DeploymentFailure(
             f"Failed to deploy chute {chute.chute_id} with version {chute.version}: {exc}\n{traceback.format_exc()}"
         )
+
+
+async def cleanup_service(deployment_id: str):
+    """
+    Delete the k8s service associated with a deployment.
+    """
+    try:
+        k8s_core_client().delete_namespaced_service(
+            name=f"chute-service-{deployment_id}",
+            namespace=settings.namespace,
+        )
+    except Exception as exc:
+        logger.warning(f"Error removing primary service chute-service-{deployment_id}: {exc}")
+
+
+async def deploy_chute(
+    chute_id: str,
+    server_id: str,
+    deployment_id: str,
+    service: Any,
+    token: str = None,
+    job_id: str = None,
+    config_id: str = None,
+    disk_gb: int = 10,
+    extra_labels: dict[str, str] = {},
+):
+    """
+    Exception handling deployment, such that if a deployment fails the service can be cleaned up.
+    """
+    try:
+        return await _deploy_chute(
+            chute_id,
+            server_id,
+            deployment_id,
+            service,
+            token=token,
+            extra_labels=extra_labels,
+            job_id=job_id,
+            config_id=config_id,
+            disk_gb=disk_gb,
+        )
+    except Exception as exc:
+        logger.warning(
+            f"Deployment of {chute_id=} on {server_id=} with {deployment_id=} {job_id=} failed, cleaning up service...: {exc=}"
+        )
+        await cleanup_service(deployment_id)
+        raise

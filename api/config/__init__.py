@@ -6,7 +6,7 @@ import os
 import json
 import redis.asyncio as redis
 from functools import lru_cache
-from typing import Any, List, Optional
+from typing import Any, List
 from pydantic import BaseModel
 from substrateinterface import Keypair
 from pydantic_settings import BaseSettings
@@ -45,6 +45,11 @@ def k8s_app_client():
     return create_kubernetes_client(cls=client.AppsV1Api)
 
 
+@lru_cache(maxsize=1)
+def k8s_batch_client():
+    return create_kubernetes_client(cls=client.BatchV1Api)
+
+
 @lru_cache(maxsize=32)
 def validator_by_hotkey(hotkey: str):
     valis = [validator for validator in settings.validators if validator.hotkey == hotkey]
@@ -66,7 +71,12 @@ class Settings(BaseSettings):
     subtensor: str = os.getenv("SUBTENSOR_ADDRESS", "wss://entrypoint-finney.opentensor.ai:443")
     namespace: str = os.getenv("CHUTES_NAMESPACE", "chutes")
     graval_bootstrap_image: str = os.getenv(
-        "GRAVAL_BOOTSTRAP_IMAGE", "parachutes/graval-bootstrap:0.1.2-opencl",
+        "GRAVAL_BOOTSTRAP_IMAGE",
+        "parachutes/graval-bootstrap-opencl:0.2.6-cuda",
+    )
+    graval_bootstrap_image_rocm: str = os.getenv(
+        "GRAVAL_BOOTSTRAP_IMAGE_ROCM",
+        "parachutes/graval-bootstrap-opencl:0.2.6-rocm",
     )
     graval_bootstrap_timeout: int = int(os.getenv("GRAVAL_BOOTSTRAP_TIMEOUT", "900"))
     miner_ss58: str = os.environ["MINER_SS58"]

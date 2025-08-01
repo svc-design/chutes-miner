@@ -784,13 +784,13 @@ files = [
 
 [[package]]
 name = "graval"
-version = "0.1.2"
+version = "0.2.6"
 description = "GraVal - graphics (card) validation framework"
 optional = false
 python-versions = "*"
 groups = ["main"]
 files = [
-    {file = "graval-0.1.2-py3-none-any.whl", hash = "sha256:94da953b41d74856ad747da1d7a4aebc8912a467b58364d8ad1be3374c5958f8"},
+    {file = "graval-0.2.6-py3-none-any.whl", hash = "sha256:483278b554ef5e5d63c3da9c08b12e813b81f886a9fd95f66ccfffedda823dc2"},
 ]
 
 [package.dependencies]
@@ -2117,4 +2117,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.12"
-content-hash = "1d9ddfb395686173533cc7c233f47b36c198683cd2c5e310ad4a362b23e4dd82"
+content-hash = "09285b9b48eea68b7d738e9c4b1ed5479128178a77c4cd511df87395f4b3f6bf"

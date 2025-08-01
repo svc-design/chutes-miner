@@ -1,5 +1,7 @@
 createPasswords: false  # XXX only ever set to true one time (first time)!!!
 
+calico: true
+
 cache:
   max_age_days: 30
   max_size_gb: 500
